@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title">
+  <title id="title">ResolveAI mark</title>
+  <defs>
+    <linearGradient id="resolveai-gradient" x1="22" y1="24" x2="106" y2="102" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#10dbe5" />
+      <stop offset=".48" stop-color="#25e99d" />
+      <stop offset="1" stop-color="#6340f2" />
+    </linearGradient>
+  </defs>
+  <path fill="url(#resolveai-gradient)" d="m59 13-34 20a8 8 0 0 0-4 7v41a8 8 0 0 0 4 7l35 22v-20L39 76a8 8 0 0 1-4-7V51a8 8 0 0 1 4-7l25-15a8 8 0 0 0 0-13l-5-3Z" />
+  <path fill="url(#resolveai-gradient)" d="m69 13 34 20a8 8 0 0 1 4 7v41a8 8 0 0 1-4 7L80 101V81l13-8a8 8 0 0 0 4-7V51a8 8 0 0 0-4-7L68 29a8 8 0 0 1 0-13l1-3Z" />
+  <path fill="url(#resolveai-gradient)" d="M64 38c3 14 10 21 25 26-15 3-22 10-25 25-3-15-10-22-25-25 15-5 22-12 25-26Z" />
+</svg>

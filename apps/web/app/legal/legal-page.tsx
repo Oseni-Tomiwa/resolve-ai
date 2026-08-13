@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { ResolveAILogo } from '../resolveai-logo';
 
 export type LegalSection = { heading: string; body: string };
 
@@ -17,7 +18,7 @@ export function LegalPage({
     <main className="site-shell legal-shell">
       <nav className="public-nav" aria-label="Main navigation">
         <Link className="brand" href="/" aria-label="ResolveAI home">
-          <span className="brand-mark">R</span>
+          <ResolveAILogo size="sm" decorative />
           <span>
             resolve<span className="brand-accent">ai</span>
           </span>
@@ -48,7 +49,7 @@ export function LegalPage({
       </article>
       <footer className="site-footer section-wrap">
         <Link className="brand" href="/">
-          <span className="brand-mark">R</span>
+          <ResolveAILogo size="sm" decorative />
           <span>
             resolve<span className="brand-accent">ai</span>
           </span>

@@ -15,6 +15,15 @@ describe('Agent request DTO contracts', () => {
     expect(dto.maxOutputTokens).toBe(600);
   });
 
+  it('accepts an enabled provider and matching model pair', async () => {
+    // Arrange
+    const dto = plainToInstance(CreateAgentDto, { name: 'Claude Support', instructions: 'Use knowledge.', provider: 'anthropic', model: 'claude-sonnet-4-6' });
+    // Act
+    const errors = await validate(dto);
+    // Assert
+    expect(errors).toHaveLength(0);
+  });
+
   it('rejects an unapproved model and unsafe token limits', async () => {
     // Arrange
     const dto = plainToInstance(CreateAgentDto, { name: 'Support', instructions: 'Use knowledge.', model: 'unapproved-model', maxOutputTokens: 20 });

@@ -89,7 +89,7 @@ export class WidgetService {
   }
 
   private async publicConfiguration(publicId: string, request: OriginRequest, requireEnabled = true) {
-    const configuration = await this.db.widgetConfiguration.findUnique({ where: { publicId }, include: { selectedAgent: { select: { id: true, name: true, description: true, greeting: true, instructions: true, fallbackMessage: true, model: true, temperature: true, topP: true, maxOutputTokens: true, requireCitations: true, groundedOnly: true, allowFollowUpQuestions: true, allowGeneralKnowledge: true, status: true, deletedAt: true, ...agentDocumentSelection } } } });
+    const configuration = await this.db.widgetConfiguration.findUnique({ where: { publicId }, include: { selectedAgent: { select: { id: true, name: true, description: true, greeting: true, instructions: true, fallbackMessage: true, provider: true, model: true, temperature: true, topP: true, maxOutputTokens: true, requireCitations: true, groundedOnly: true, allowFollowUpQuestions: true, allowGeneralKnowledge: true, status: true, deletedAt: true, ...agentDocumentSelection } } } });
     if (!configuration || configuration.selectedAgent.status !== 'ACTIVE' || configuration.selectedAgent.deletedAt) this.publicError(HttpStatus.NOT_FOUND, 'WIDGET_NOT_FOUND', 'This support widget is unavailable.');
     this.assertOrigin(configuration, this.origin(request));
     if (requireEnabled && !configuration.enabled) this.publicError(HttpStatus.FORBIDDEN, 'WIDGET_DISABLED', 'This support widget is currently unavailable.');
@@ -160,7 +160,7 @@ export class WidgetService {
     if (!created.assistant) { yield { type: 'message.completed', messageId: created.user.id, mode: 'HUMAN' }; return; }
     yield { type: 'message.started', messageId: created.assistant.id };
     try {
-      const prepared = await this.grounded.preparePublic(configuration.workspaceId, content, { instructions: conversation.agent.instructions, fallbackMessage: conversation.agent.fallbackMessage, model: conversation.agent.model, temperature: conversation.agent.temperature, topP: conversation.agent.topP, maxOutputTokens: conversation.agent.maxOutputTokens, documentIds: conversation.agent.knowledgeDocuments?.map((item) => item.knowledgeDocumentId) ?? [], requireCitations: conversation.agent.requireCitations, groundedOnly: conversation.agent.groundedOnly, allowGeneralKnowledge: conversation.agent.allowGeneralKnowledge });
+      const prepared = await this.grounded.preparePublic(configuration.workspaceId, content, { instructions: conversation.agent.instructions, fallbackMessage: conversation.agent.fallbackMessage, provider: conversation.agent.provider, model: conversation.agent.model, temperature: conversation.agent.temperature, topP: conversation.agent.topP, maxOutputTokens: conversation.agent.maxOutputTokens, documentIds: conversation.agent.knowledgeDocuments?.map((item) => item.knowledgeDocumentId) ?? [], requireCitations: conversation.agent.requireCitations, groundedOnly: conversation.agent.groundedOnly, allowGeneralKnowledge: conversation.agent.allowGeneralKnowledge });
       if (prepared.insufficient) {
         const fallback = conversation.agent.fallbackMessage ?? 'I couldn’t find enough information in the workspace knowledge base to answer that.';
         await this.complete(created.assistant.id, configuration.workspaceId, fallback, null, prepared, []);
@@ -168,9 +168,9 @@ export class WidgetService {
       }
       await this.db.widgetMessage.update({ where: { id: created.assistant.id }, data: { status: 'STREAMING' } });
       const deltas: string[] = []; let usage = { inputTokens: 0, outputTokens: 0 };
-      for await (const event of this.grounded.streamPrepared({ question: prepared.question, context: prepared.context, instructions: prepared.instructions, maximumOutputTokens: prepared.maximumOutputTokens, model: prepared.model, temperature: prepared.temperature, topP: prepared.topP })) { if (event.type === 'response.delta') { deltas.push(event.delta); yield { type: 'message.delta', delta: event.delta }; } if (event.type === 'response.completed') usage = event.usage; if (event.type === 'response.failed') throw new Error('generation_failed'); }
+      for await (const event of this.grounded.streamPrepared({ question: prepared.question, context: prepared.context, instructions: prepared.instructions, maximumOutputTokens: prepared.maximumOutputTokens, provider: prepared.provider, model: prepared.model, temperature: prepared.temperature, topP: prepared.topP })) { if (event.type === 'response.delta') { deltas.push(event.delta); yield { type: 'message.delta', delta: event.delta }; } if (event.type === 'response.completed') usage = event.usage; if (event.type === 'response.failed') throw new Error('generation_failed'); }
       const answer = deltas.join('').trim(); const sources = this.grounded.sourcesFor(prepared, Array.from(answer.matchAll(/\[(\d+)\]/g), (match) => Number(match[1])));
-      await this.complete(created.assistant.id, configuration.workspaceId, answer, this.grounded.providerMetadata().provider, prepared, sources, usage);
+      await this.complete(created.assistant.id, configuration.workspaceId, answer, prepared.provider, prepared, sources, usage);
       yield { type: 'sources', sources: sources.map((source) => ({ number: source.number, documentName: source.documentName, contentPreview: source.contentPreview, cited: source.cited })) }; yield { type: 'message.completed', messageId: created.assistant.id };
     } catch (error) { await this.db.widgetMessage.update({ where: { id: created.assistant.id }, data: { status: 'FAILED', errorCode: error instanceof Error && error.name === 'AbortError' ? 'CANCELLED' : 'GENERATION_FAILED' } }).catch(() => undefined); yield { type: 'message.failed', error: { code: 'GENERATION_FAILED', message: 'The support assistant could not complete this response.' } }; }
   }

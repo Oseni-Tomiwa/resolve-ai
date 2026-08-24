@@ -2,10 +2,29 @@ import { z } from 'zod';
 import { config as loadDotenv } from 'dotenv';
 import { resolve } from 'node:path';
 
-export const generationModels = [{ id: 'gpt-4o-mini', label: 'GPT-4o mini' }] as const;
+export type AIProvider = 'openai' | 'anthropic' | 'google';
+export type AIModelDefinition = {
+  provider: AIProvider;
+  id: string;
+  label: string;
+  enabled: boolean;
+  supportsStreaming: boolean;
+  supportsStructuredOutput: boolean;
+  supportsToolCalling: boolean;
+  contextWindowTokens?: number;
+  maxOutputTokens?: number;
+};
+
+export const generationModels: readonly AIModelDefinition[] = [
+  { provider: 'openai', id: 'gpt-4o-mini', label: 'GPT-4o mini', enabled: true, supportsStreaming: true, supportsStructuredOutput: true, supportsToolCalling: true },
+  { provider: 'anthropic', id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', enabled: true, supportsStreaming: true, supportsStructuredOutput: false, supportsToolCalling: true },
+  { provider: 'google', id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', enabled: true, supportsStreaming: true, supportsStructuredOutput: true, supportsToolCalling: true },
+];
 export const embeddingModels = [{ id: 'text-embedding-3-small', label: 'text-embedding-3-small' }] as const;
 export const generationModelIds = generationModels.map((model) => model.id) as [string, ...string[]];
 export const embeddingModelIds = embeddingModels.map((model) => model.id) as [string, ...string[]];
+export const getGenerationModel = (provider: string, model: string): AIModelDefinition | undefined => generationModels.find((candidate) => candidate.provider === provider && candidate.id === model && candidate.enabled);
+export const isGenerationModelEnabled = (model: string): boolean => generationModels.some((candidate) => candidate.id === model && candidate.enabled);
 const optionalOpenAIKey = z.preprocess((value) => value === '' ? undefined : value, z.string().min(1).optional());
 
 export const envSchema = z.object({
@@ -81,10 +100,14 @@ export type EmbeddingEnv = z.infer<typeof embeddingEnvSchema>;
 export const loadEmbeddingEnv = (input: Record<string, string | undefined>): EmbeddingEnv => embeddingEnvSchema.parse(input);
 export const generationEnvSchema = z.object({
   OPENAI_API_KEY: optionalOpenAIKey,
-  OPENAI_GENERATION_MODEL: z.enum(generationModelIds).default('gpt-4o-mini'),
+  ANTHROPIC_API_KEY: optionalOpenAIKey,
+  GOOGLE_AI_API_KEY: optionalOpenAIKey,
+  OPENAI_GENERATION_MODEL: z.string().min(1).default('gpt-4o-mini'),
   AI_MAX_OUTPUT_TOKENS: z.coerce.number().int().min(128).max(2000).default(800),
   AI_RETRIEVAL_LIMIT: z.coerce.number().int().min(1).max(20).default(5),
   AI_MINIMUM_SCORE: z.coerce.number().min(0).max(1).default(0.4),
+}).superRefine((value, context) => {
+  if (!getGenerationModel('openai', value.OPENAI_GENERATION_MODEL)) context.addIssue({ code: z.ZodIssueCode.custom, path: ['OPENAI_GENERATION_MODEL'], message: 'OPENAI_GENERATION_MODEL is not an enabled OpenAI model' });
 });
 export type GenerationEnv = z.infer<typeof generationEnvSchema>;
 export const loadGenerationEnv = (input: Record<string, string | undefined>): GenerationEnv => generationEnvSchema.parse(input);
@@ -112,6 +135,7 @@ export const validateRuntimeEnv = (input: Record<string, string | undefined>): R
   if (env.JWT_ACCESS_SECRET.includes('replace-with') || env.JWT_REFRESH_SECRET.includes('replace-with')) errors.push('JWT secrets must be replaced with strong production values');
   if (env.JWT_ACCESS_SECRET === env.JWT_REFRESH_SECRET) errors.push('JWT access and refresh secrets must differ');
   if (!ai.OPENAI_API_KEY) errors.push('OPENAI_API_KEY is required in production');
+  if (!getGenerationModel('openai', ai.OPENAI_GENERATION_MODEL)) errors.push(`OPENAI_GENERATION_MODEL is not an enabled OpenAI model: ${ai.OPENAI_GENERATION_MODEL}`);
   for (const [name, value] of [['WEB_URL', env.WEB_URL], ['API_URL', env.API_URL], ['PUBLIC_API_URL', env.PUBLIC_API_URL], ['NEXT_PUBLIC_API_URL', env.NEXT_PUBLIC_API_URL], ['WIDGET_SCRIPT_URL', env.WIDGET_SCRIPT_URL]] as const) {
     if (isLocalUrl(value)) errors.push(`${name} must not use localhost in production`);
     if (!value.startsWith('https://')) errors.push(`${name} must use HTTPS in production`);

@@ -1,0 +1,1 @@
+ALTER TABLE "AIAgent" ADD COLUMN "provider" TEXT NOT NULL DEFAULT 'openai';

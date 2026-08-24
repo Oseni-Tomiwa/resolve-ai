@@ -19,6 +19,12 @@ describe('AI environment contract', () => {
     expect(JSON.stringify({ model: generation.OPENAI_GENERATION_MODEL })).not.toContain('sk-test-only');
   });
 
+  it('accepts optional Anthropic and Google provider credentials without exposing them', () => {
+    const generation = loadGenerationEnv({ ANTHROPIC_API_KEY: 'anthropic-test-only', GOOGLE_AI_API_KEY: 'google-test-only', OPENAI_GENERATION_MODEL: 'gpt-4o-mini' });
+    expect(generation).toMatchObject({ ANTHROPIC_API_KEY: 'anthropic-test-only', GOOGLE_AI_API_KEY: 'google-test-only' });
+    expect(JSON.stringify({ model: generation.OPENAI_GENERATION_MODEL })).not.toContain('test-only');
+  });
+
   it('rejects unsupported models and invalid numeric settings', () => {
     // Arrange / Act / Assert
     expect(() => loadGenerationEnv({ OPENAI_GENERATION_MODEL: 'unknown-model' })).toThrow();

@@ -1,9 +1,10 @@
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import type { Prisma, PrismaClient } from '@resolveai/database';
+import { getGenerationModel } from '@resolveai/config';
 // Nest dependency injection needs the service constructor at runtime.
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { GroundedAnswerService } from '../knowledge/grounded-answer.service';
-import { defaultAgent, defaultAgentMaxOutputTokens, defaultAgentModel, defaultAgentTemperature } from './agent.config';
+import { defaultAgent, defaultAgentMaxOutputTokens, defaultAgentModel, defaultAgentProvider, defaultAgentTemperature } from './agent.config';
 // Nest dependency injection needs this constructor at runtime.
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { WebhookEventsService } from '../webhooks/webhook-events.service';
@@ -38,8 +39,15 @@ export class AgentsService {
     return access;
   }
 
-  private view(agent: { id: string; workspaceId: string; name: string; slug: string; description: string | null; instructions: string; greeting: string | null; fallbackMessage: string | null; model: string; temperature: number; topP: number; maxOutputTokens: number; requireCitations: boolean; groundedOnly: boolean; allowFollowUpQuestions: boolean; allowGeneralKnowledge: boolean; status: string; isDefault: boolean; publishedAt: Date | null; createdAt: Date; updatedAt: Date; knowledgeDocuments?: Array<{ knowledgeDocumentId: string }> }, includeConfiguration: boolean) {
-    return { id: agent.id, workspaceId: agent.workspaceId, name: agent.name, slug: agent.slug, description: agent.description, greeting: agent.greeting, model: agent.model, status: agent.status, isDefault: agent.isDefault, publishedAt: agent.publishedAt, selectedDocumentCount: agent.knowledgeDocuments?.length ?? 0, createdAt: agent.createdAt, updatedAt: agent.updatedAt, ...(includeConfiguration ? { instructions: agent.instructions, fallbackMessage: agent.fallbackMessage, temperature: agent.temperature, topP: agent.topP, maxOutputTokens: agent.maxOutputTokens, requireCitations: agent.requireCitations, groundedOnly: agent.groundedOnly, allowFollowUpQuestions: agent.allowFollowUpQuestions, allowGeneralKnowledge: agent.allowGeneralKnowledge, documentIds: agent.knowledgeDocuments?.map((item) => item.knowledgeDocumentId) ?? [] } : {}) };
+  private view(agent: { id: string; workspaceId: string; name: string; slug: string; description: string | null; instructions: string; greeting: string | null; fallbackMessage: string | null; provider: string; model: string; temperature: number; topP: number; maxOutputTokens: number; requireCitations: boolean; groundedOnly: boolean; allowFollowUpQuestions: boolean; allowGeneralKnowledge: boolean; status: string; isDefault: boolean; publishedAt: Date | null; createdAt: Date; updatedAt: Date; knowledgeDocuments?: Array<{ knowledgeDocumentId: string }> }, includeConfiguration: boolean) {
+    return { id: agent.id, workspaceId: agent.workspaceId, name: agent.name, slug: agent.slug, description: agent.description, greeting: agent.greeting, provider: agent.provider, model: agent.model, status: agent.status, isDefault: agent.isDefault, publishedAt: agent.publishedAt, selectedDocumentCount: agent.knowledgeDocuments?.length ?? 0, createdAt: agent.createdAt, updatedAt: agent.updatedAt, ...(includeConfiguration ? { instructions: agent.instructions, fallbackMessage: agent.fallbackMessage, temperature: agent.temperature, topP: agent.topP, maxOutputTokens: agent.maxOutputTokens, requireCitations: agent.requireCitations, groundedOnly: agent.groundedOnly, allowFollowUpQuestions: agent.allowFollowUpQuestions, allowGeneralKnowledge: agent.allowGeneralKnowledge, documentIds: agent.knowledgeDocuments?.map((item) => item.knowledgeDocumentId) ?? [] } : {}) };
+  }
+
+  private modelSelection(provider: string | undefined, model: string | undefined): { provider: string; model: string } {
+    const selectedProvider = provider ?? defaultAgentProvider;
+    const selectedModel = model ?? defaultAgentModel;
+    if (!getGenerationModel(selectedProvider, selectedModel)) throw new ConflictException('The selected AI model is disabled or unsupported');
+    return { provider: selectedProvider, model: selectedModel };
   }
 
   private async validateDocumentIds(workspaceId: string, documentIds: string[] | undefined): Promise<string[]> {
@@ -61,7 +69,7 @@ export class AgentsService {
     const existing = await this.db.aIAgent.findFirst({ where: { workspaceId, isDefault: true, deletedAt: null, status: 'ACTIVE' } });
     if (existing) return existing;
     try {
-      return await this.db.aIAgent.create({ data: { workspaceId, createdByUserId, ...defaultAgent, model: defaultAgentModel, temperature: defaultAgentTemperature, topP: 1, maxOutputTokens: defaultAgentMaxOutputTokens, status: 'ACTIVE', isDefault: true } });
+      return await this.db.aIAgent.create({ data: { workspaceId, createdByUserId, ...defaultAgent, provider: defaultAgentProvider, model: defaultAgentModel, temperature: defaultAgentTemperature, topP: 1, maxOutputTokens: defaultAgentMaxOutputTokens, status: 'ACTIVE', isDefault: true } });
     } catch (error) {
       if ((error as { code?: string }).code !== 'P2002') throw error;
       const created = await this.db.aIAgent.findFirst({ where: { workspaceId, isDefault: true, deletedAt: null, status: 'ACTIVE' } });
@@ -88,7 +96,8 @@ export class AgentsService {
     const existingCount = await this.db.aIAgent.count({ where: { workspaceId, deletedAt: null } });
     const shouldBeDefault = dto.isDefault === true || existingCount === 0;
     const documentIds = await this.validateDocumentIds(workspaceId, dto.documentIds);
-    const data = { workspaceId, createdByUserId: userId, name: dto.name.trim(), slug: slugify(dto.slug ?? dto.name), description: trimNullable(dto.description) ?? null, instructions: dto.instructions.trim(), greeting: trimNullable(dto.greeting) ?? null, fallbackMessage: trimNullable(dto.fallbackMessage) ?? null, model: dto.model ?? defaultAgentModel, temperature: dto.temperature ?? defaultAgentTemperature, topP: dto.topP ?? 1, maxOutputTokens: dto.maxOutputTokens ?? defaultAgentMaxOutputTokens, requireCitations: dto.requireCitations ?? true, groundedOnly: dto.groundedOnly ?? true, allowFollowUpQuestions: dto.allowFollowUpQuestions ?? true, allowGeneralKnowledge: dto.allowGeneralKnowledge ?? false, status: shouldBeDefault ? 'ACTIVE' as const : dto.status ?? 'DRAFT' as const, isDefault: shouldBeDefault };
+    const selection = this.modelSelection(dto.provider, dto.model);
+    const data = { workspaceId, createdByUserId: userId, name: dto.name.trim(), slug: slugify(dto.slug ?? dto.name), description: trimNullable(dto.description) ?? null, instructions: dto.instructions.trim(), greeting: trimNullable(dto.greeting) ?? null, fallbackMessage: trimNullable(dto.fallbackMessage) ?? null, ...selection, temperature: dto.temperature ?? defaultAgentTemperature, topP: dto.topP ?? 1, maxOutputTokens: dto.maxOutputTokens ?? defaultAgentMaxOutputTokens, requireCitations: dto.requireCitations ?? true, groundedOnly: dto.groundedOnly ?? true, allowFollowUpQuestions: dto.allowFollowUpQuestions ?? true, allowGeneralKnowledge: dto.allowGeneralKnowledge ?? false, status: shouldBeDefault ? 'ACTIVE' as const : dto.status ?? 'DRAFT' as const, isDefault: shouldBeDefault };
     try {
       const agent = await this.db.$transaction(async (tx) => {
         if (shouldBeDefault) await tx.aIAgent.updateMany({ where: { workspaceId, isDefault: true, deletedAt: null }, data: { isDefault: false } });
@@ -132,7 +141,8 @@ export class AgentsService {
     if (current.isDefault && dto.status && dto.status !== 'ACTIVE') throw new ConflictException('Choose another default agent before disabling this agent');
     if (dto.isDefault === true && (dto.status ?? current.status) !== 'ACTIVE') throw new ConflictException('Only active agents can be the workspace default');
     const documentIds = dto.documentIds === undefined ? undefined : await this.validateDocumentIds(workspaceId, dto.documentIds);
-    const data = { ...(dto.name === undefined ? {} : { name: dto.name.trim() }), ...(dto.slug === undefined ? {} : { slug: slugify(dto.slug) }), ...(dto.description === undefined ? {} : { description: trimNullable(dto.description) }), ...(dto.instructions === undefined ? {} : { instructions: dto.instructions.trim() }), ...(dto.greeting === undefined ? {} : { greeting: trimNullable(dto.greeting) }), ...(dto.fallbackMessage === undefined ? {} : { fallbackMessage: trimNullable(dto.fallbackMessage) }), ...(dto.model === undefined ? {} : { model: dto.model }), ...(dto.temperature === undefined ? {} : { temperature: dto.temperature }), ...(dto.topP === undefined ? {} : { topP: dto.topP }), ...(dto.maxOutputTokens === undefined ? {} : { maxOutputTokens: dto.maxOutputTokens }), ...(dto.requireCitations === undefined ? {} : { requireCitations: dto.requireCitations }), ...(dto.groundedOnly === undefined ? {} : { groundedOnly: dto.groundedOnly }), ...(dto.allowFollowUpQuestions === undefined ? {} : { allowFollowUpQuestions: dto.allowFollowUpQuestions }), ...(dto.allowGeneralKnowledge === undefined ? {} : { allowGeneralKnowledge: dto.allowGeneralKnowledge }), ...(dto.status === undefined ? {} : { status: dto.status }), ...(dto.isDefault === undefined ? {} : { isDefault: dto.isDefault }) };
+    const selection = dto.provider !== undefined || dto.model !== undefined ? this.modelSelection(dto.provider ?? current.provider, dto.model ?? current.model) : undefined;
+    const data = { ...(dto.name === undefined ? {} : { name: dto.name.trim() }), ...(dto.slug === undefined ? {} : { slug: slugify(dto.slug) }), ...(dto.description === undefined ? {} : { description: trimNullable(dto.description) }), ...(dto.instructions === undefined ? {} : { instructions: dto.instructions.trim() }), ...(dto.greeting === undefined ? {} : { greeting: trimNullable(dto.greeting) }), ...(dto.fallbackMessage === undefined ? {} : { fallbackMessage: trimNullable(dto.fallbackMessage) }), ...(selection ?? {}), ...(dto.temperature === undefined ? {} : { temperature: dto.temperature }), ...(dto.topP === undefined ? {} : { topP: dto.topP }), ...(dto.maxOutputTokens === undefined ? {} : { maxOutputTokens: dto.maxOutputTokens }), ...(dto.requireCitations === undefined ? {} : { requireCitations: dto.requireCitations }), ...(dto.groundedOnly === undefined ? {} : { groundedOnly: dto.groundedOnly }), ...(dto.allowFollowUpQuestions === undefined ? {} : { allowFollowUpQuestions: dto.allowFollowUpQuestions }), ...(dto.allowGeneralKnowledge === undefined ? {} : { allowGeneralKnowledge: dto.allowGeneralKnowledge }), ...(dto.status === undefined ? {} : { status: dto.status }), ...(dto.isDefault === undefined ? {} : { isDefault: dto.isDefault }) };
     try {
       const agent = await this.db.$transaction(async (tx) => {
         if (dto.isDefault === true) await tx.aIAgent.updateMany({ where: { workspaceId, isDefault: true, deletedAt: null, id: { not: agentId } }, data: { isDefault: false } });
@@ -170,7 +180,7 @@ export class AgentsService {
     const current = await this.db.aIAgent.findFirst({ where: { id: agentId, workspaceId, deletedAt: null }, include: agentDocumentInclude });
     if (!current) throw new NotFoundException('Agent not found');
     const name = `${current.name} Copy`;
-    return this.create(userId, workspaceId, { name, slug: `${current.slug}-copy`, description: current.description ?? undefined, instructions: current.instructions, greeting: current.greeting ?? undefined, fallbackMessage: current.fallbackMessage ?? undefined, model: current.model, temperature: current.temperature, topP: current.topP, maxOutputTokens: current.maxOutputTokens, requireCitations: current.requireCitations, groundedOnly: current.groundedOnly, allowFollowUpQuestions: current.allowFollowUpQuestions, allowGeneralKnowledge: current.allowGeneralKnowledge, documentIds: current.knowledgeDocuments.map((item) => item.knowledgeDocumentId), isDefault: false });
+    return this.create(userId, workspaceId, { name, slug: `${current.slug}-copy`, description: current.description ?? undefined, instructions: current.instructions, greeting: current.greeting ?? undefined, fallbackMessage: current.fallbackMessage ?? undefined, provider: current.provider, model: current.model, temperature: current.temperature, topP: current.topP, maxOutputTokens: current.maxOutputTokens, requireCitations: current.requireCitations, groundedOnly: current.groundedOnly, allowFollowUpQuestions: current.allowFollowUpQuestions, allowGeneralKnowledge: current.allowGeneralKnowledge, documentIds: current.knowledgeDocuments.map((item) => item.knowledgeDocumentId), isDefault: false });
   }
 
   async publish(userId: string, workspaceId: string, agentId: string) {
@@ -205,9 +215,9 @@ export class AgentsService {
     const agent = await this.db.aIAgent.findFirst({ where: { id: agentId, workspaceId, deletedAt: null }, include: agentDocumentInclude });
     if (!agent) throw new NotFoundException('Agent not found');
     const startedAt = Date.now();
-    const prepared = await this.grounded.prepare(userId, workspaceId, dto.question, undefined, { instructions: agent.instructions, fallbackMessage: agent.fallbackMessage, model: agent.model, temperature: agent.temperature, topP: agent.topP, maxOutputTokens: agent.maxOutputTokens, documentIds: agent.knowledgeDocuments?.map((item) => item.knowledgeDocumentId) ?? [], requireCitations: agent.requireCitations, groundedOnly: agent.groundedOnly, allowGeneralKnowledge: agent.allowGeneralKnowledge });
+    const prepared = await this.grounded.prepare(userId, workspaceId, dto.question, undefined, { instructions: agent.instructions, fallbackMessage: agent.fallbackMessage, provider: agent.provider, model: agent.model, temperature: agent.temperature, topP: agent.topP, maxOutputTokens: agent.maxOutputTokens, documentIds: agent.knowledgeDocuments?.map((item) => item.knowledgeDocumentId) ?? [], requireCitations: agent.requireCitations, groundedOnly: agent.groundedOnly, allowGeneralKnowledge: agent.allowGeneralKnowledge });
     if (prepared.insufficient) return { answer: agent.fallbackMessage ?? 'I couldn’t find enough information in the selected knowledge documents to answer that.', sources: [], metadata: { model: null, retrievalResultCount: 0, latencyMs: Date.now() - startedAt, insufficientContext: true, published: false } };
-    const generated = await this.grounded.completePrepared({ question: prepared.question, context: prepared.context, instructions: prepared.instructions, maximumOutputTokens: prepared.maximumOutputTokens, model: prepared.model, temperature: prepared.temperature, topP: prepared.topP });
+    const generated = await this.grounded.completePrepared({ question: prepared.question, context: prepared.context, instructions: prepared.instructions, maximumOutputTokens: prepared.maximumOutputTokens, provider: prepared.provider, model: prepared.model, temperature: prepared.temperature, topP: prepared.topP });
     if (prepared.requireCitations && generated.citedSourceNumbers.length === 0) return { answer: agent.fallbackMessage ?? 'I couldn’t validate citations for this answer.', sources: [], metadata: { model: generated.model, provider: generated.provider, usage: generated.usage, retrievalResultCount: prepared.selected.length, latencyMs: Date.now() - startedAt, insufficientContext: true, published: false } };
     return { answer: generated.answer, sources: this.grounded.sourcesFor(prepared, generated.citedSourceNumbers), metadata: { model: generated.model, provider: generated.provider, usage: generated.usage, retrievalResultCount: prepared.selected.length, latencyMs: Date.now() - startedAt, insufficientContext: false, published: false } };
   }

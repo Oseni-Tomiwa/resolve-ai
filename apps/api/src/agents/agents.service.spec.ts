@@ -2,7 +2,7 @@ import { ConflictException, ForbiddenException } from '@nestjs/common';
 import type { PrismaClient } from '@resolveai/database';
 import { AgentsService } from './agents.service';
 
-const agent = { id: 'agent-1', workspaceId: 'workspace-1', createdByUserId: 'user-1', name: 'Support Agent', slug: 'support-agent', description: 'Grounded support', instructions: 'Use the sources.', greeting: 'Hi', fallbackMessage: 'No answer.', model: 'gpt-4o-mini', temperature: 0.2, maxOutputTokens: 800, status: 'ACTIVE', isDefault: true, createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01'), deletedAt: null };
+const agent = { id: 'agent-1', workspaceId: 'workspace-1', createdByUserId: 'user-1', name: 'Support Agent', slug: 'support-agent', description: 'Grounded support', instructions: 'Use the sources.', greeting: 'Hi', fallbackMessage: 'No answer.', provider: 'openai', model: 'gpt-4o-mini', temperature: 0.2, maxOutputTokens: 800, status: 'ACTIVE', isDefault: true, createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-01'), deletedAt: null };
 
 function setup() {
   const db = {
@@ -35,6 +35,15 @@ describe('AgentsService', () => {
     await service.create('user-1', 'workspace-1', { name: 'Billing Helper', instructions: 'Answer billing questions.', status: 'ACTIVE' });
     // Assert
     expect(db.aIAgent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ isDefault: true, workspaceId: 'workspace-1', model: 'gpt-4o-mini' }) }));
+  });
+
+  it('persists the selected provider with its model', async () => {
+    // Arrange
+    const { db, service } = setup();
+    // Act
+    await service.create('user-1', 'workspace-1', { name: 'Claude Helper', instructions: 'Use the sources.', provider: 'anthropic', model: 'claude-sonnet-4-6' });
+    // Assert
+    expect(db.aIAgent.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ provider: 'anthropic', model: 'claude-sonnet-4-6' }) }));
   });
 
   it('rejects a viewer from creating an agent', async () => {

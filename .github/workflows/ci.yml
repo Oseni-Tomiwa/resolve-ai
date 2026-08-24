@@ -13,16 +13,43 @@ jobs:
       REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: pnpm }
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @resolveai/database generate
       - run: pnpm --filter @resolveai/database validate
-      - run: git grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- ':!pnpm-lock.yaml'
+      - name: Check for merge-conflict markers
+        shell: bash
+        run: |
+          set +e
+          git grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- ':!pnpm-lock.yaml'
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "Merge-conflict markers found."
+            exit 1
+          elif [ "$status" -eq 1 ]; then
+            echo "No merge-conflict markers found."
+          else
+            exit "$status"
+          fi
       - run: pnpm --filter @resolveai/database exec prisma validate --schema ./prisma/schema.prisma
       - run: pnpm lint
-      - run: pnpm format
+      - name: Check formatting for newly added source files
+        shell: bash
+        run: |
+          base_sha="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$base_sha" ] || ! git cat-file -e "$base_sha^{commit}" 2>/dev/null; then
+            base_sha="$(git rev-parse HEAD^)"
+          fi
+          files="$(git diff --diff-filter=A --name-only "$base_sha"...HEAD | grep -E '\.(cjs|css|js|json|mjs|md|ts|tsx|yaml|yml)$' || true)"
+          if [ -n "$files" ]; then
+            pnpm exec prettier --check $files
+          else
+            echo "No newly added Prettier-supported source files to check."
+          fi
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build

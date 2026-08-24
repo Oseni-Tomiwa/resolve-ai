@@ -1,5 +1,5 @@
-import type { GenerationEnv } from '@resolveai/config';
-import { OpenAITextGenerationProvider, type GroundedAnswerInput, type GroundedAnswerOutput, type GenerationEvent, type TextGenerationProvider } from '@resolveai/ai';
+import { getGenerationModel, type GenerationEnv } from '@resolveai/config';
+import { AnthropicTextGenerationProvider, GoogleTextGenerationProvider, OpenAITextGenerationProvider, type GroundedAnswerInput, type GroundedAnswerOutput, type GenerationEvent, type TextGenerationProvider } from '@resolveai/ai';
 import { BadRequestException, HttpException, HttpStatus, Inject, Injectable, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 // Nest dependency injection needs this constructor at runtime.
@@ -16,20 +16,33 @@ export const GENERATION_CONFIG = 'GENERATION_CONFIG';
 const insufficientAnswer = 'I couldn’t find enough information in this workspace’s knowledge base to answer that.';
 const contextCharacterLimit = 12000;
 export type GroundedSource = { id: string; number: number; documentId: string; documentName: string; chunkIndex: number; contentPreview: string; similarityScore: number; cited: boolean; chunkId: string };
-export type PreparedGroundedAnswer = { question: string; selected: Awaited<ReturnType<SemanticSearchService['search']>>['results']; sources: GroundedSource[]; context: string; instructions: string; maximumOutputTokens: number; model: string; temperature: number; topP: number; requireCitations: boolean; insufficient: boolean };
-export type AgentGenerationOptions = { instructions?: string; fallbackMessage?: string | null; model?: string; temperature?: number; topP?: number; maxOutputTokens?: number; documentIds?: string[]; requireCitations?: boolean; groundedOnly?: boolean; allowGeneralKnowledge?: boolean };
+export type PreparedGroundedAnswer = { question: string; selected: Awaited<ReturnType<SemanticSearchService['search']>>['results']; sources: GroundedSource[]; context: string; instructions: string; maximumOutputTokens: number; provider: string; model: string; temperature: number; topP: number; requireCitations: boolean; insufficient: boolean };
+export type AgentGenerationOptions = { instructions?: string; fallbackMessage?: string | null; provider?: string; model?: string; temperature?: number; topP?: number; maxOutputTokens?: number; documentIds?: string[]; requireCitations?: boolean; groundedOnly?: boolean; allowGeneralKnowledge?: boolean };
 @Injectable()
 export class EnvironmentTextGenerationProvider implements TextGenerationProvider {
   readonly provider = 'openai';
   constructor(@Inject(GENERATION_CONFIG) private readonly config: GenerationEnv) {}
   get model(): string { return this.config.OPENAI_GENERATION_MODEL; }
+  private resolve(provider: string, model: string): TextGenerationProvider {
+    if (!getGenerationModel(provider, model)) throw new BadRequestException('The selected AI model is disabled or unsupported');
+    if (provider === 'openai') {
+      if (!this.config.OPENAI_API_KEY) throw new ServiceUnavailableException('OpenAI generation is not configured');
+      return new OpenAITextGenerationProvider({ apiKey: this.config.OPENAI_API_KEY, model });
+    }
+    if (provider === 'anthropic') {
+      if (!this.config.ANTHROPIC_API_KEY) throw new ServiceUnavailableException('Anthropic generation is not configured');
+      return new AnthropicTextGenerationProvider({ apiKey: this.config.ANTHROPIC_API_KEY, model });
+    }
+    if (!this.config.GOOGLE_AI_API_KEY) throw new ServiceUnavailableException('Google AI generation is not configured');
+    return new GoogleTextGenerationProvider({ apiKey: this.config.GOOGLE_AI_API_KEY, model });
+  }
   async generateGroundedAnswer(input: Parameters<TextGenerationProvider['generateGroundedAnswer']>[0]): Promise<GroundedAnswerOutput> {
-    if (!this.config.OPENAI_API_KEY) throw new ServiceUnavailableException('Grounded answer generation is not configured');
-    return new OpenAITextGenerationProvider({ apiKey: this.config.OPENAI_API_KEY, model: this.config.OPENAI_GENERATION_MODEL }).generateGroundedAnswer(input);
+    return this.resolve(input.provider ?? 'openai', input.model ?? this.config.OPENAI_GENERATION_MODEL).generateGroundedAnswer(input);
   }
   streamGroundedAnswer(input: Parameters<TextGenerationProvider['generateGroundedAnswer']>[0], signal?: AbortSignal): AsyncIterable<GenerationEvent> {
-    if (!this.config.OPENAI_API_KEY) throw new ServiceUnavailableException('Grounded answer generation is not configured');
-    return new OpenAITextGenerationProvider({ apiKey: this.config.OPENAI_API_KEY, model: this.config.OPENAI_GENERATION_MODEL }).streamGroundedAnswer(input, signal);
+    const provider = this.resolve(input.provider ?? 'openai', input.model ?? this.config.OPENAI_GENERATION_MODEL);
+    if (!provider.streamGroundedAnswer) throw new ServiceUnavailableException('Streaming answer generation is not configured');
+    return provider.streamGroundedAnswer(input, signal);
   }
 }
 
@@ -80,18 +93,20 @@ export class GroundedAnswerService {
     const selected = [] as typeof retrieval.results;
     let contextLength = 0;
     for (const result of retrieval.results) { const normalized = normalizeForDeduplication(result.content); if (selected.some((candidate) => normalized === normalizeForDeduplication(candidate.content) || heavilyOverlaps(normalized, normalizeForDeduplication(candidate.content)))) continue; if (contextLength + result.content.length > contextCharacterLimit) break; selected.push(result); contextLength += result.content.length; }
+    const provider = agent?.provider ?? 'openai';
     const model = agent?.model ?? env.OPENAI_GENERATION_MODEL;
+    if (!getGenerationModel(provider, model)) throw new BadRequestException('The selected AI model is disabled or unsupported');
     const temperature = agent?.temperature ?? 0.2;
     const topP = agent?.topP ?? 1;
     const maximumOutputTokens = agent?.maxOutputTokens ?? env.AI_MAX_OUTPUT_TOKENS;
     const instructions = composeAgentInstructions(agent?.instructions);
     console.info(JSON.stringify({ event: 'knowledge.grounded_context_retrieved', workspaceId, userId: userId ?? null, retrievedResultCount: retrieval.results.length, selectedSourceCount: selected.length, contextCharacterCount: contextLength, minimumScore: env.AI_MINIMUM_SCORE, publicAccess }));
     const requireCitations = agent?.requireCitations ?? true;
-    if (selected.length === 0) return { question, selected, sources: [], context: '', instructions, maximumOutputTokens, model, temperature, topP, requireCitations, insufficient: true };
+    if (selected.length === 0) return { question, selected, sources: [], context: '', instructions, maximumOutputTokens, provider, model, temperature, topP, requireCitations, insufficient: true };
     await this.billingUsage?.assertCanConsume(workspaceId, 'TOKENS', Math.ceil(contextLength / 4) + maximumOutputTokens);
     const promptSources = selected.map((result, index) => ({ number: index + 1, documentName: result.document.name, chunkIndex: result.chunkIndex, content: result.content }));
     console.info(JSON.stringify({ event: 'knowledge.grounded_prompt_constructed', workspaceId, userId: userId ?? null, sourceCount: promptSources.length, contextCharacterCount: contextLength, model, maximumOutputTokens, publicAccess }));
-    return { question, selected, sources: [], context: buildGroundedContext(promptSources), instructions, maximumOutputTokens, model, temperature, topP, requireCitations, insufficient: false };
+    return { question, selected, sources: [], context: buildGroundedContext(promptSources), instructions, maximumOutputTokens, provider, model, temperature, topP, requireCitations, insufficient: false };
   }
 
   sourcesFor(prepared: PreparedGroundedAnswer, citedSourceNumbers: readonly number[]): GroundedSource[] {

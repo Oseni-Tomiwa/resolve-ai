@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenAI } from '@google/genai';
 import OpenAI from 'openai';
 
 export interface EmbeddingProvider {
@@ -14,6 +16,7 @@ export type GroundedAnswerInput = {
   context: string;
   conversationContext?: string;
   maximumOutputTokens: number;
+  provider?: string;
   model?: string;
   temperature?: number;
   topP?: number;
@@ -86,6 +89,8 @@ export function validateEmbeddingVectors(vectors: readonly (readonly number[])[]
 }
 
 export type OpenAITextGenerationProviderOptions = { apiKey: string; model?: string };
+export type AnthropicTextGenerationProviderOptions = { apiKey: string; model: string };
+export type GoogleTextGenerationProviderOptions = { apiKey: string; model: string };
 
 const citedNumbers = (answer: string): number[] => [...new Set(Array.from(answer.matchAll(/\[(\d+)\]/g), (match) => Number(match[1])))].filter((number) => Number.isInteger(number) && number > 0);
 
@@ -146,6 +151,101 @@ export class DeterministicTextGenerationProvider implements TextGenerationProvid
       yield { type: 'response.delta', delta };
     }
     yield { type: 'response.completed', usage: result.usage };
+  }
+}
+
+export class AnthropicTextGenerationProvider implements TextGenerationProvider {
+  readonly provider = 'anthropic';
+  readonly model: string;
+  private readonly client: Anthropic;
+
+  constructor(options: AnthropicTextGenerationProviderOptions) {
+    this.client = new Anthropic({ apiKey: options.apiKey });
+    this.model = options.model;
+  }
+
+  async generateGroundedAnswer(input: GroundedAnswerInput): Promise<GroundedAnswerOutput> {
+    const response = await this.client.messages.create({
+      model: this.model,
+      system: input.instructions,
+      max_tokens: input.maximumOutputTokens,
+      temperature: input.temperature ?? 0.2,
+      top_p: input.topP ?? 1,
+      messages: [{ role: 'user', content: formatGenerationInput(input) }],
+    });
+    const answer = response.content.filter((block): block is Anthropic.TextBlock => block.type === 'text').map((block) => block.text).join('').trim();
+    if (!answer) throw new Error('Text generation provider returned an empty answer');
+    return { answer, citedSourceNumbers: citedNumbers(answer), provider: this.provider, model: this.model, usage: { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens } };
+  }
+
+  async *streamGroundedAnswer(input: GroundedAnswerInput, signal?: AbortSignal): AsyncIterable<GenerationEvent> {
+    const stream = this.client.messages.stream({
+      model: this.model,
+      system: input.instructions,
+      max_tokens: input.maximumOutputTokens,
+      temperature: input.temperature ?? 0.2,
+      top_p: input.topP ?? 1,
+      messages: [{ role: 'user', content: formatGenerationInput(input) }],
+    });
+    yield { type: 'response.started' };
+    let answer = '';
+    let usage = { inputTokens: 0, outputTokens: 0 };
+    try {
+      for await (const event of stream) {
+        if (signal?.aborted) throw abortError();
+        if (event.type === 'message_start') usage = { inputTokens: event.message.usage.input_tokens, outputTokens: 0 };
+        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+          answer += event.delta.text;
+          yield { type: 'response.delta', delta: event.delta.text };
+        }
+        if (event.type === 'message_delta') usage = { ...usage, outputTokens: event.usage.output_tokens };
+      }
+      if (!answer.trim()) throw new Error('Text generation provider returned an empty answer');
+      yield { type: 'response.completed', usage };
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      yield { type: 'response.failed', errorCode: 'PROVIDER_FAILED' };
+    }
+  }
+}
+
+export class GoogleTextGenerationProvider implements TextGenerationProvider {
+  readonly provider = 'google';
+  readonly model: string;
+  private readonly client: GoogleGenAI;
+
+  constructor(options: GoogleTextGenerationProviderOptions) {
+    this.client = new GoogleGenAI({ apiKey: options.apiKey });
+    this.model = options.model;
+  }
+
+  private request(input: GroundedAnswerInput) {
+    return { model: this.model, contents: formatGenerationInput(input), config: { systemInstruction: input.instructions, temperature: input.temperature ?? 0.2, topP: input.topP ?? 1, maxOutputTokens: input.maximumOutputTokens } };
+  }
+
+  async generateGroundedAnswer(input: GroundedAnswerInput): Promise<GroundedAnswerOutput> {
+    const response = await this.client.models.generateContent(this.request(input));
+    const answer = response.text?.trim() ?? '';
+    if (!answer) throw new Error('Text generation provider returned an empty answer');
+    return { answer, citedSourceNumbers: citedNumbers(answer), provider: this.provider, model: this.model, usage: { inputTokens: response.usageMetadata?.promptTokenCount ?? 0, outputTokens: response.usageMetadata?.candidatesTokenCount ?? 0 } };
+  }
+
+  async *streamGroundedAnswer(input: GroundedAnswerInput, signal?: AbortSignal): AsyncIterable<GenerationEvent> {
+    const stream = await this.client.models.generateContentStream(this.request(input));
+    yield { type: 'response.started' };
+    let usage = { inputTokens: 0, outputTokens: 0 };
+    try {
+      for await (const chunk of stream) {
+        if (signal?.aborted) throw abortError();
+        const delta = chunk.text ?? '';
+        if (delta) yield { type: 'response.delta', delta };
+        usage = { inputTokens: chunk.usageMetadata?.promptTokenCount ?? usage.inputTokens, outputTokens: chunk.usageMetadata?.candidatesTokenCount ?? usage.outputTokens };
+      }
+      yield { type: 'response.completed', usage };
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      yield { type: 'response.failed', errorCode: 'PROVIDER_FAILED' };
+    }
   }
 }
 

@@ -106,7 +106,7 @@ export class ConversationsService {
       yield { type: 'message.started', messageId: assistantId };
       const agentId = conversation.agentId ?? (await this.agents.ensureDefault(workspaceId, userId)).id;
       const agent = await this.agents.requireActiveForGeneration(workspaceId, agentId);
-      const prepared = await this.grounded.prepare(userId, workspaceId, content, undefined, { instructions: agent.instructions, fallbackMessage: agent.fallbackMessage, model: agent.model, temperature: agent.temperature, topP: agent.topP, maxOutputTokens: agent.maxOutputTokens, documentIds: agent.knowledgeDocuments?.map((item) => item.knowledgeDocumentId) ?? [], requireCitations: agent.requireCitations, groundedOnly: agent.groundedOnly, allowGeneralKnowledge: agent.allowGeneralKnowledge });
+      const prepared = await this.grounded.prepare(userId, workspaceId, content, undefined, { instructions: agent.instructions, fallbackMessage: agent.fallbackMessage, provider: agent.provider, model: agent.model, temperature: agent.temperature, topP: agent.topP, maxOutputTokens: agent.maxOutputTokens, documentIds: agent.knowledgeDocuments?.map((item) => item.knowledgeDocumentId) ?? [], requireCitations: agent.requireCitations, groundedOnly: agent.groundedOnly, allowGeneralKnowledge: agent.allowGeneralKnowledge });
       if (prepared.insufficient) {
         const fallback = agent.fallbackMessage ?? insufficientAnswer;
         await this.completeAssistant(assistantId, workspaceId, conversationId, fallback, null, prepared.model, { inputTokens: 0, outputTokens: 0 }, [], agent);
@@ -118,7 +118,7 @@ export class ConversationsService {
       await this.db.aIMessage.update({ where: { id: assistantId }, data: { status: 'STREAMING' } });
       const deltas: string[] = [];
       let usage = { inputTokens: 0, outputTokens: 0 };
-      for await (const event of this.grounded.streamPrepared({ question: prepared.question, context: prepared.context, instructions: prepared.instructions, conversationContext: history, maximumOutputTokens: prepared.maximumOutputTokens, model: prepared.model, temperature: prepared.temperature, topP: prepared.topP }, signal)) {
+      for await (const event of this.grounded.streamPrepared({ question: prepared.question, context: prepared.context, instructions: prepared.instructions, conversationContext: history, maximumOutputTokens: prepared.maximumOutputTokens, provider: prepared.provider, model: prepared.model, temperature: prepared.temperature, topP: prepared.topP }, signal)) {
         if (event.type === 'response.delta') { if (event.delta.length > 0) { deltas.push(event.delta); yield { type: 'message.delta', delta: event.delta }; } }
         if (event.type === 'response.completed') usage = event.usage;
         if (event.type === 'response.failed') throw new ServiceUnavailableException('Grounded answer generation failed');
@@ -127,8 +127,7 @@ export class ConversationsService {
       if (!answer) throw new ServiceUnavailableException('Grounded answer generation returned an empty response');
       const cited = Array.from(answer.matchAll(/\[(\d+)\]/g), (match) => Number(match[1]));
       const sources = this.grounded.sourcesFor(prepared, cited);
-      const metadata = this.grounded.providerMetadata();
-      await this.completeAssistant(assistantId, workspaceId, conversationId, answer, metadata.provider, prepared.model, usage, sources, agent);
+      await this.completeAssistant(assistantId, workspaceId, conversationId, answer, prepared.provider, prepared.model, usage, sources, agent);
       yield { type: 'sources', sources };
       yield { type: 'message.completed', message: await this.completedMessage(assistantId, workspaceId) };
     } catch (error) {

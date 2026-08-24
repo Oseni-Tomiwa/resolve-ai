@@ -2,7 +2,8 @@ import { generationModelIds, generationModels } from '@resolveai/config';
 
 export const agentModels = generationModels;
 export const agentModelIds = generationModelIds;
-export const defaultAgentModel = agentModels[0].id;
+export const defaultAgentModel = agentModels[0]!.id;
+export const defaultAgentProvider = agentModels[0]!.provider;
 export const defaultAgentTemperature = 0.2;
 export const defaultAgentMaxOutputTokens = 800;
 

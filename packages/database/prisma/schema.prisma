@@ -427,6 +427,7 @@ model AIAgent {
   instructions           String
   greeting               String?
   fallbackMessage        String?
+  provider               String                 @default("openai")
   model                  String
   temperature            Float                    @default(0.2)
   topP                   Float                    @default(1)

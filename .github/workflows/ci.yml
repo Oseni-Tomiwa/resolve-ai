@@ -19,7 +19,21 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @resolveai/database generate
       - run: pnpm --filter @resolveai/database validate
-      - run: git grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- ':!pnpm-lock.yaml'
+      - name: Check for merge-conflict markers
+        shell: bash
+        run: |
+          set +e
+          git grep -nE '^(<<<<<<<|=======|>>>>>>>)' -- ':!pnpm-lock.yaml'
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "Merge-conflict markers found."
+            exit 1
+          elif [ "$status" -eq 1 ]; then
+            echo "No merge-conflict markers found."
+          else
+            exit "$status"
+          fi
       - run: pnpm --filter @resolveai/database exec prisma validate --schema ./prisma/schema.prisma
       - run: pnpm lint
       - run: pnpm format

@@ -127,4 +127,96 @@ describe('AuthService', () => {
     expect(result).not.toHaveProperty('passwordHash');
     expect(db.$transaction).toHaveBeenCalledWith(expect.any(Array));
   });
+
+  it('returns the same forgot-password result for existing and unknown accounts', async () => {
+    // Arrange
+    const db = createDatabase();
+    const email = { sendPasswordReset: jest.fn().mockResolvedValue(undefined) };
+    db.user.findUnique.mockResolvedValue(user);
+    db.passwordResetToken.create.mockResolvedValue({});
+    process.env.NODE_ENV = 'development';
+    process.env.WEB_URL = 'http://localhost:3000';
+    const service = new AuthService(db as never, email as never);
+
+    // Act
+    const existing = await service.forgotPassword(user.email);
+    db.user.findUnique.mockResolvedValue(null);
+    const unknown = await service.forgotPassword('missing@example.com');
+
+    // Assert
+    expect(existing).toEqual({ sent: true });
+    expect(unknown).toEqual({ sent: true });
+    expect(existing).toEqual(unknown);
+    expect(email.sendPasswordReset).toHaveBeenCalledWith(expect.objectContaining({ email: user.email, url: expect.stringContaining('/reset-password?token=') }));
+    expect(db.passwordResetToken.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ tokenHash: expect.any(String) }) }));
+    expect(db.passwordResetToken.create.mock.calls[0][0].data).not.toHaveProperty('token');
+    expect(email.sendPasswordReset).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an invalid reset token', async () => {
+    // Arrange
+    const db = createDatabase();
+    db.$transaction.mockImplementation(async (callback: (transaction: MockDatabase) => Promise<unknown>) => callback(db));
+    db.passwordResetToken.findFirst.mockResolvedValue(null);
+    const service = new AuthService(db as never);
+
+    // Act / Assert
+    await expect(service.resetPassword('invalid-reset-token', 'NewPassword123!')).rejects.toThrow(new UnauthorizedException('This password reset link is invalid or expired'));
+    expect(db.user.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects expired and previously used reset tokens', async () => {
+    // Arrange
+    const db = createDatabase();
+    db.$transaction.mockImplementation(async (callback: (transaction: MockDatabase) => Promise<unknown>) => callback(db));
+    const service = new AuthService(db as never);
+
+    // Act / Assert: Prisma query excludes both expired and consumed records.
+    db.passwordResetToken.findFirst.mockResolvedValue(null);
+    await expect(service.resetPassword('expired-reset-token', 'NewPassword123!')).rejects.toThrow(UnauthorizedException);
+    await expect(service.resetPassword('used-reset-token', 'NewPassword123!')).rejects.toThrow(UnauthorizedException);
+    expect(db.passwordResetToken.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ usedAt: null, expiresAt: { gt: expect.any(Date) } }) }));
+  });
+
+  it('changes the password, consumes the token, and revokes existing sessions', async () => {
+    // Arrange
+    const db = createDatabase();
+    const mutableUser = { ...user };
+    db.$transaction.mockImplementation(async (callback: (transaction: MockDatabase) => Promise<unknown>) => callback(db));
+    db.passwordResetToken.findFirst.mockResolvedValue({ id: 'reset-1', userId: user.id });
+    db.passwordResetToken.updateMany.mockResolvedValue({ count: 1 });
+    db.user.update.mockImplementation(async ({ data }: { data: { passwordHash: string } }) => Object.assign(mutableUser, data));
+    db.refreshToken.updateMany.mockResolvedValue({ count: 2 });
+    mockedArgon2.hash.mockResolvedValue('new-password-hash');
+    const service = new AuthService(db as never);
+
+    // Act
+    await service.resetPassword('valid-reset-token', 'NewPassword123!');
+
+    // Assert
+    expect(db.passwordResetToken.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'reset-1', usedAt: null }, data: { usedAt: expect.any(Date) } }));
+    expect(db.user.update).toHaveBeenCalledWith({ where: { id: user.id }, data: { passwordHash: 'new-password-hash' } });
+    expect(db.refreshToken.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: user.id, revokedAt: null } }));
+    expect(mutableUser.passwordHash).toBe('new-password-hash');
+  });
+
+  it('allows the new password and rejects the old password after reset', async () => {
+    // Arrange
+    const db = createDatabase();
+    const mutableUser = { ...user };
+    db.$transaction.mockImplementation(async (callback: (transaction: MockDatabase) => Promise<unknown>) => callback(db));
+    db.passwordResetToken.findFirst.mockResolvedValue({ id: 'reset-2', userId: user.id });
+    db.passwordResetToken.updateMany.mockResolvedValue({ count: 1 });
+    db.user.update.mockImplementation(async ({ data }: { data: { passwordHash: string } }) => Object.assign(mutableUser, data));
+    db.refreshToken.updateMany.mockResolvedValue({ count: 1 });
+    mockedArgon2.hash.mockResolvedValue('new-password-hash');
+    mockedArgon2.verify.mockImplementation(async (hash: string, password: string) => hash === 'new-password-hash' && password === 'NewPassword123!');
+    db.user.findUnique.mockImplementation(async () => mutableUser);
+    const service = new AuthService(db as never);
+    await service.resetPassword('valid-reset-token', 'NewPassword123!');
+
+    // Act / Assert
+    await expect(service.login({ email: user.email, password: 'Password123!' })).rejects.toThrow(UnauthorizedException);
+    await expect(service.login({ email: user.email, password: 'NewPassword123!' })).resolves.toHaveProperty('user.email', user.email);
+  });
 });

@@ -53,15 +53,31 @@ export class AuthService {
     if (user && !user.emailVerifiedAt) { await this.db.emailVerificationToken.updateMany({ where: { userId: user.id, usedAt: null }, data: { usedAt: new Date() } }); const token = await this.lifecycleToken(user.id, 'verification'); const url = this.previewUrl('/verify-email', token.raw); await this.email?.sendVerification({ email: user.email, url: url ?? `${process.env.WEB_URL ?? ''}/verify-email`, expiresAt: token.expiresAt }); return { sent: true, ...(url ? { previewUrl: url } : {}) }; }
     return { sent: true };
   }
-  async forgotPassword(emailAddress: string): Promise<{ sent: true; previewUrl?: string }> {
+  async forgotPassword(emailAddress: string): Promise<{ sent: true }> {
     const user = await this.db.user.findUnique({ where: { email: emailAddress.trim().toLowerCase() } });
-    if (user) { await this.db.passwordResetToken.updateMany({ where: { userId: user.id, usedAt: null }, data: { usedAt: new Date() } }); const token = await this.lifecycleToken(user.id, 'reset'); const url = this.previewUrl('/reset-password', token.raw); await this.email?.sendPasswordReset({ email: user.email, url: url ?? `${process.env.WEB_URL ?? ''}/reset-password`, expiresAt: token.expiresAt }); return { sent: true, ...(url ? { previewUrl: url } : {}) }; }
+    if (user) {
+      await this.db.passwordResetToken.updateMany({ where: { userId: user.id, usedAt: null }, data: { usedAt: new Date() } });
+      const token = await this.lifecycleToken(user.id, 'reset');
+      const url = this.previewUrl('/reset-password', token.raw);
+      try {
+        await this.email?.sendPasswordReset({ email: user.email, url: url ?? `${process.env.WEB_URL ?? ''}/reset-password`, expiresAt: token.expiresAt });
+      } catch {
+        // Keep this endpoint indistinguishable for existing and unknown accounts.
+      }
+      return { sent: true };
+    }
     return { sent: true };
   }
   async resetPassword(raw: string, password: string): Promise<void> {
-    const token = await this.db.passwordResetToken.findFirst({ where: { tokenHash: hashToken(raw), usedAt: null, expiresAt: { gt: new Date() } } });
-    if (!token) throw new UnauthorizedException('This password reset link is invalid or expired');
-    await this.db.$transaction([this.db.passwordResetToken.update({ where: { id: token.id }, data: { usedAt: new Date() } }), this.db.user.update({ where: { id: token.userId }, data: { passwordHash: await argon2.hash(password) } }), this.db.refreshToken.updateMany({ where: { userId: token.userId, revokedAt: null }, data: { revokedAt: new Date() } })]);
+    const tokenHash = hashToken(raw);
+    await this.db.$transaction(async (tx) => {
+      const token = await tx.passwordResetToken.findFirst({ where: { tokenHash, usedAt: null, expiresAt: { gt: new Date() } } });
+      if (!token) throw new UnauthorizedException('This password reset link is invalid or expired');
+      const consumed = await tx.passwordResetToken.updateMany({ where: { id: token.id, usedAt: null }, data: { usedAt: new Date() } });
+      if (consumed.count !== 1) throw new UnauthorizedException('This password reset link is invalid or expired');
+      await tx.user.update({ where: { id: token.userId }, data: { passwordHash: await argon2.hash(password) } });
+      await tx.refreshToken.updateMany({ where: { userId: token.userId, revokedAt: null }, data: { revokedAt: new Date() } });
+    });
   }
   private async persistRefresh(userId: string, token: string): Promise<void> { await this.db.refreshToken.create({ data: { userId, tokenHash: hashToken(token), expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) } }); }
   async refresh(token: string): Promise<Tokens> { const stored = await this.db.refreshToken.findUnique({ where: { tokenHash: hashToken(token) } }); if (!stored || stored.revokedAt || stored.expiresAt < new Date()) throw new UnauthorizedException('Invalid refresh token'); const next = this.issueTokens(stored.userId); await this.db.$transaction([this.db.refreshToken.update({ where: { id: stored.id }, data: { revokedAt: new Date() } }), this.db.refreshToken.create({ data: { userId: stored.userId, tokenHash: hashToken(next.refreshToken), expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) } })]); return next; }

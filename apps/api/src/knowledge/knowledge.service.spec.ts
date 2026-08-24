@@ -1,8 +1,12 @@
 import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
-import { KnowledgeService } from './knowledge.service';
 import type { KnowledgeQueueService } from './knowledge-queue.service';
 
+jest.mock('node:dns/promises', () => ({ lookup: jest.fn().mockResolvedValue([{ address: '93.184.216.34' }]) }));
 jest.mock('@resolveai/storage', () => ({ createStorageFromEnv: jest.fn().mockReturnValue({ save: jest.fn(), delete: jest.fn() }), LocalStorage: jest.fn() }));
+
+// The custom Jest transform does not hoist ES-module mocks, so this test loads the service after registering mocks.
+// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/consistent-type-imports
+const { KnowledgeService } = require('./knowledge.service') as { KnowledgeService: typeof import('./knowledge.service').KnowledgeService };
 
 type Db = {
   workspace: { findUnique: jest.Mock };
@@ -47,6 +51,26 @@ describe('KnowledgeService', () => {
     const database = db(); const service = new KnowledgeService(database as never, { add: jest.fn() } as unknown as KnowledgeQueueService);
     // Act / Assert
     await expect(service.addUrl('user-1', 'workspace-1', 'http://127.0.0.1:4000/private')).rejects.toThrow(ConflictException);
+  });
+
+  it('streams website bodies and rejects an oversized response without Content-Length', async () => {
+    const database = db(); const service = new KnowledgeService(database as never, { add: jest.fn() } as unknown as KnowledgeQueueService);
+    global.fetch = jest.fn().mockResolvedValue(new Response(Buffer.alloc(10 * 1024 * 1024 + 1), { headers: { 'content-type': 'text/plain' } }));
+    await expect(service.addUrl('user-1', 'workspace-1', 'https://example.com/large')).rejects.toThrow('10 MB or smaller');
+  });
+
+  it('limits redirects and revalidates each destination', async () => {
+    const database = db(); const service = new KnowledgeService(database as never, { add: jest.fn() } as unknown as KnowledgeQueueService);
+    global.fetch = jest.fn().mockImplementation(async () => new Response(null, { status: 302, headers: { location: `https://example.com/redirect-${(global.fetch as jest.Mock).mock.calls.length}` } }));
+    await expect(service.addUrl('user-1', 'workspace-1', 'https://example.com/start')).rejects.toThrow('too many times');
+  });
+
+  it('accepts a bounded public website response', async () => {
+    const database = db(); database.knowledgeDocument.create.mockResolvedValue({ id: 'doc-url', storageKey: 'knowledge/workspace-1/doc-url/example.com.html', name: 'example.com/', originalFileName: 'https://example.com/', mimeType: 'text/plain', sizeBytes: 5, status: 'UPLOADED', uploadedBy: null });
+    const queue = { add: jest.fn().mockResolvedValue(undefined) } as unknown as KnowledgeQueueService; const service = new KnowledgeService(database as never, queue);
+    global.fetch = jest.fn().mockResolvedValue(new Response('hello', { headers: { 'content-type': 'text/plain', 'content-length': '5' } }));
+    await expect(service.addUrl('user-1', 'workspace-1', 'https://example.com/')).resolves.toEqual(expect.objectContaining({ id: 'doc-url' }));
+    expect(queue.add).toHaveBeenCalledWith('doc-url', 'workspace-1');
   });
 
   it('lists only the current workspace with pagination and search filters', async () => {

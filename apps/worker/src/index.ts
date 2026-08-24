@@ -3,7 +3,7 @@ import { Worker } from 'bullmq';
 import { Redis } from 'ioredis';
 import { prisma } from '@resolveai/database';
 import { createStorageFromEnv } from '@resolveai/storage';
-import { loadEmbeddingEnv, loadRootEnv, validateRuntimeEnv } from '@resolveai/config';
+import { loadEmbeddingEnv, loadRootEnv, redisConnectionOptionsFromEnv, validateRuntimeEnv } from '@resolveai/config';
 import { chunkText } from './chunking.js';
 import { createProductionEmbeddingProvider, embedDocumentChunks } from './embedding.js';
 import { extractText } from './processing.js';
@@ -19,7 +19,7 @@ const log = (line: string): void => { try { writeWorkerLog(JSON.parse(line) as R
 const queueName = 'knowledge-processing';
 const webhookQueueName = 'webhook-delivery';
 const emailQueueName = 'email-delivery';
-const connection = { url: runtimeEnv.REDIS_URL };
+const connection = redisConnectionOptionsFromEnv(runtimeEnv, 'worker');
 const storage = createStorageFromEnv(process.env);
 
 const withTimeout = <T>(task: Promise<T>, timeoutMs: number): Promise<T> => new Promise<T>((resolve, reject) => { const timer = setTimeout(() => reject(new Error('WORKER_JOB_TIMEOUT')), timeoutMs); task.then((value) => { clearTimeout(timer); resolve(value); }, (error: unknown) => { clearTimeout(timer); reject(error); }); });
@@ -88,7 +88,7 @@ const emailWorker = new Worker(emailQueueName, async (job) => { await deliverEma
 
 const webhookWorker = new Worker(webhookQueueName, async (job) => { await deliverWebhook(prisma, (job.data as { deliveryId: string }).deliveryId); }, { connection, concurrency: 4 });
 
-const readinessRedis = new Redis(runtimeEnv.REDIS_URL, { lazyConnect: true, maxRetriesPerRequest: 1, enableOfflineQueue: false });
+const readinessRedis = new Redis(redisConnectionOptionsFromEnv(runtimeEnv));
 const healthServer = createServer(async (request, response) => {
   response.setHeader('Content-Type', 'application/json');
   if (request.url === '/health') { response.statusCode = 200; response.end(JSON.stringify({ success: true, data: { status: 'ok' } })); return; }

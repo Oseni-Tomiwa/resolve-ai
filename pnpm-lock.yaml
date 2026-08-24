@@ -187,6 +187,9 @@ importers:
       '@resolveai/database':
         specifier: workspace:*
         version: link:../../packages/database
+      '@resolveai/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       '@resolveai/storage':
         specifier: workspace:*
         version: link:../../packages/storage
@@ -327,6 +330,9 @@ importers:
       '@resolveai/eslint-config':
         specifier: workspace:*
         version: link:../eslint-config
+      '@types/node':
+        specifier: ^22.10.5
+        version: 22.20.1
       eslint:
         specifier: ^9.17.0
         version: 9.39.5(jiti@2.7.0)

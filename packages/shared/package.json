@@ -1,5 +1,5 @@
 {
   "name": "@resolveai/shared", "version": "0.1.0", "private": true, "type": "module", "main": "./src/index.ts", "types": "./src/index.ts", "exports": { ".": "./src/index.ts" },
   "scripts": { "lint": "pnpm exec eslint src", "typecheck": "tsc --noEmit -p ./tsconfig.json", "test": "echo 'shared tests pending'" },
-  "devDependencies": { "@resolveai/eslint-config": "workspace:*", "eslint": "^9.17.0", "typescript": "^5.7.2" }
+  "devDependencies": { "@resolveai/eslint-config": "workspace:*", "@types/node": "^22.10.5", "eslint": "^9.17.0", "typescript": "^5.7.2" }
 }

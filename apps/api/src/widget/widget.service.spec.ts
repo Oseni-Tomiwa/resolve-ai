@@ -5,7 +5,7 @@ const agent = { id: 'agent-1', name: 'Support Agent', description: 'Helpful', gr
 const configuration = { id: 'config-1', workspaceId: 'workspace-1', publicId: 'widget_public', enabled: true, name: 'Support', greeting: 'Welcome', accentColor: '#7ce7dc', position: 'BOTTOM_RIGHT', launcherLabel: 'Chat', allowedDomains: ['https://docs.example.com'], selectedAgentId: 'agent-1', selectedAgent: agent };
 
 function makeService() {
-  const db = { widgetConfiguration: { findUnique: jest.fn().mockResolvedValue(configuration), upsert: jest.fn(), update: jest.fn() }, widgetSession: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() }, widgetConversation: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn() }, widgetMessage: { create: jest.fn() }, aIAgent: { findMany: jest.fn().mockResolvedValue([agent]), findFirst: jest.fn().mockResolvedValue({ id: agent.id }) } };
+  const db = { widgetConfiguration: { findUnique: jest.fn().mockResolvedValue(configuration), upsert: jest.fn(), update: jest.fn() }, widgetSession: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() }, widgetConversation: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) }, widgetMessage: { create: jest.fn() }, aIAgent: { findMany: jest.fn().mockResolvedValue([agent]), findFirst: jest.fn().mockResolvedValue({ id: agent.id }) } };
   return { service: new WidgetService(db as never, {} as never), db };
 }
 
@@ -83,7 +83,7 @@ describe('WidgetService', () => {
 
     // Assert
     expect(result).toEqual({ mode: 'HUMAN', status: 'OPEN' });
-    expect(db.widgetConversation.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id_workspaceId: { id: 'conversation-1', workspaceId: 'workspace-1' } }, data: expect.objectContaining({ mode: 'HUMAN', status: 'OPEN' }) }));
+    expect(db.widgetConversation.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ mode: 'AI', workspaceId: 'workspace-1' }), data: expect.objectContaining({ mode: 'HUMAN', status: 'OPEN', generationLockAt: null }) }));
     expect(db.widgetMessage.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ role: 'SYSTEM', content: 'A visitor requested a support teammate.' }) }));
     expect(JSON.stringify(result)).not.toContain('private');
   });

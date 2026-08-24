@@ -2,12 +2,13 @@ import { Controller, Get, HttpStatus, Inject, Module, Res } from '@nestjs/common
 import { Redis } from 'ioredis';
 import type { Response } from 'express';
 import type { PrismaClient } from '@resolveai/database';
+import { redisConnectionOptionsFromEnv } from '@resolveai/config';
 
 type DependencyStatus = 'ok' | 'unavailable';
 
 @Controller('health')
 export class HealthController {
-  private readonly redis = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379', { lazyConnect: true, maxRetriesPerRequest: 1, enableOfflineQueue: false });
+  private readonly redis = new Redis(redisConnectionOptionsFromEnv());
   constructor(@Inject('PRISMA') private readonly db: PrismaClient) {}
 
   @Get()

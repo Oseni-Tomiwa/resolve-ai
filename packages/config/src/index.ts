@@ -118,6 +118,37 @@ export const loadEnv = (input: Record<string, string | undefined>): Env => envSc
 
 export type RuntimeEnv = Env & GenerationEnv & EmbeddingEnv;
 
+export type RedisConnectionOptions = {
+  host: string;
+  port: number;
+  username?: string;
+  password?: string;
+  tls?: Record<string, never>;
+  maxRetriesPerRequest?: number | null;
+  enableOfflineQueue?: boolean;
+};
+
+export function redisConnectionOptions(value: string, mode: 'producer' | 'worker' = 'producer'): RedisConnectionOptions {
+  let parsed: URL;
+  try { parsed = new URL(value); } catch { throw new Error('REDIS_URL must be a valid redis:// or rediss:// URL'); }
+  if (!['redis:', 'rediss:'].includes(parsed.protocol) || parsed.hostname.length === 0) throw new Error('REDIS_URL must use redis:// or rediss://');
+  return {
+    host: parsed.hostname,
+    port: Number(parsed.port || 6379),
+    ...(parsed.username ? { username: decodeURIComponent(parsed.username) } : {}),
+    ...(parsed.password ? { password: decodeURIComponent(parsed.password) } : {}),
+    ...(parsed.protocol === 'rediss:' ? { tls: {} } : {}),
+    maxRetriesPerRequest: mode === 'worker' ? null : 1,
+    enableOfflineQueue: false,
+  };
+}
+
+export function redisConnectionOptionsFromEnv(input: { REDIS_URL?: string; NODE_ENV?: string } = process.env, mode: 'producer' | 'worker' = 'producer'): RedisConnectionOptions {
+  const value = input.REDIS_URL ?? (input.NODE_ENV === 'production' ? undefined : 'redis://localhost:6379');
+  if (!value) throw new Error('REDIS_URL is required');
+  return redisConnectionOptions(value, mode);
+}
+
 const isLocalUrl = (value: string): boolean => {
   try {
     const url = new URL(value);
@@ -141,6 +172,7 @@ export const validateRuntimeEnv = (input: Record<string, string | undefined>): R
     if (!value.startsWith('https://')) errors.push(`${name} must use HTTPS in production`);
   }
   if (!env.COOKIE_SECURE) errors.push('COOKIE_SECURE must be true in production');
+  if (env.TRUST_PROXY !== 1) errors.push('TRUST_PROXY must be 1 behind the single AWS ALB hop');
   if (env.COOKIE_SAME_SITE === 'none' && !env.COOKIE_SECURE) errors.push('COOKIE_SAME_SITE=none requires secure cookies');
   for (const origin of env.CORS_ALLOWED_ORIGINS.split(',').map((value) => value.trim()).filter(Boolean)) {
     try {

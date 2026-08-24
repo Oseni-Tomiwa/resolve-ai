@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import type { PrismaClient } from '@resolveai/database';
 import { createStorageFromEnv, LocalStorage } from '@resolveai/storage';
 import type { Express } from 'express';
+import { isBlockedHostname, isPrivateOrReservedAddress } from '@resolveai/shared';
 // Nest dependency injection needs this constructor at runtime.
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { KnowledgeQueueService } from './knowledge-queue.service';
@@ -17,8 +17,7 @@ const allowedMimeTypes = new Set(['application/pdf', 'text/plain', 'text/markdow
 const maxFileSize = Number(process.env.KNOWLEDGE_MAX_FILE_SIZE_BYTES ?? 10 * 1024 * 1024);
 const safeName = (name: string): string => name.normalize('NFKC').replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 160) || 'document';
 const publicDocument = (document: Record<string, unknown>) => { const { storageKey: _storageKey, extractedText: _extractedText, _count: _documentCount, ...metadata } = document; return metadata; };
-const blockedHost = (host: string): boolean => { const value = host.toLowerCase(); if (value === 'localhost' || value.endsWith('.localhost') || value === 'metadata.google.internal') return true; const version = isIP(value); if (version === 4) { const [a, b = 0] = value.split('.').map(Number); return a === 10 || a === 127 || a === 169 && b === 254 || a === 192 && b === 168 || a === 172 && b >= 16 && b <= 31; } return version === 6 && (value === '::1' || value.startsWith('fc') || value.startsWith('fd') || value.startsWith('fe80:')); };
-async function assertPublicUrl(value: string): Promise<URL> { let url: URL; try { url = new URL(value); } catch { throw new ConflictException('Enter a valid public http or https URL'); } if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port) throw new ConflictException('Only public http and https URLs are supported'); const addresses = await lookup(url.hostname, { all: true }); if (!addresses.length || addresses.some((address) => blockedHost(address.address))) throw new ConflictException('Private and local network URLs are not allowed'); return url; }
+async function assertPublicUrl(value: string): Promise<URL> { let url: URL; try { url = new URL(value); } catch { throw new ConflictException('Enter a valid public http or https URL'); } if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port) throw new ConflictException('Only public http and https URLs are supported'); if (isBlockedHostname(url.hostname)) throw new ConflictException('Private and local network URLs are not allowed'); const addresses = await lookup(url.hostname, { all: true }); if (!addresses.length || addresses.some((address) => isPrivateOrReservedAddress(address.address))) throw new ConflictException('Private and local network URLs are not allowed'); return url; }
 type Access = { organizationRole: string; workspaceRole: string; organizationId: string };
 type DocumentStatus = 'UPLOADED' | 'PROCESSING' | 'EMBEDDING' | 'READY' | 'FAILED';
 
@@ -61,12 +60,25 @@ export class KnowledgeService {
 
   async addUrl(userId: string, workspaceId: string, rawUrl: string): Promise<Record<string, unknown>> {
     await this.requireUploadAccess(userId, workspaceId);
-    const url = await assertPublicUrl(rawUrl.trim());
-    const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(15_000), headers: { Accept: 'text/html,text/plain;q=0.9' } });
-    if (response.status >= 300 && response.status < 400) { const location = response.headers.get('location'); if (!location) throw new ConflictException('The website returned an invalid redirect'); return this.addUrl(userId, workspaceId, new URL(location, url).toString()); }
+    let url = await assertPublicUrl(rawUrl.trim());
+    let response: Response | undefined;
+    const visited = new Set<string>();
+    for (let redirect = 0; redirect <= 5; redirect += 1) {
+      if (visited.has(url.toString())) throw new ConflictException('The website returned a redirect loop');
+      visited.add(url.toString());
+      response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(15_000), headers: { Accept: 'text/html,text/plain;q=0.9' } });
+      if (response.status < 300 || response.status >= 400) break;
+      const location = response.headers.get('location'); if (!location) throw new ConflictException('The website returned an invalid redirect');
+      url = await assertPublicUrl(new URL(location, url).toString());
+      if (redirect === 5) throw new ConflictException('The website redirected too many times');
+    }
+    if (!response) throw new ConflictException('The website could not be fetched');
     if (!response.ok) throw new ConflictException('The website could not be fetched');
     const type = response.headers.get('content-type')?.split(';')[0]?.trim() ?? 'text/html'; if (!['text/html', 'text/plain'].includes(type)) throw new ConflictException('Only HTML and plain-text website sources are supported'); const declaredSize = Number(response.headers.get('content-length') ?? 0); if (declaredSize > maxFileSize) throw new ConflictException('Website content must be 10 MB or smaller');
-    const buffer = Buffer.from(await response.arrayBuffer()); if (buffer.length === 0 || buffer.length > maxFileSize) throw new ConflictException('Website content must be between 1 byte and 10 MB');
+    if (!response.body) throw new ConflictException('The website returned an empty response');
+    const reader = response.body.getReader(); const chunks: Buffer[] = []; let total = 0;
+    try { while (true) { const next = await reader.read(); if (next.done) break; total += next.value.byteLength; if (total > maxFileSize) { await reader.cancel(); throw new ConflictException('Website content must be 10 MB or smaller'); } chunks.push(Buffer.from(next.value)); } } finally { reader.releaseLock(); }
+    const buffer = Buffer.concat(chunks); if (buffer.length === 0) throw new ConflictException('Website content must be between 1 byte and 10 MB');
     const name = url.hostname + url.pathname; const duplicate = await this.db.knowledgeDocument.findFirst({ where: { workspaceId, deletedAt: null, originalFileName: url.toString(), status: { not: 'FAILED' } }, select: { id: true, name: true, status: true } }); if (duplicate) throw new ConflictException(`This website source is already in the workspace (${duplicate.name})`);
     await this.billingUsage?.assertCanConsume(workspaceId, 'DOCUMENTS'); await this.billingUsage?.assertCanConsume(workspaceId, 'STORAGE', buffer.length);
     const id = randomUUID(); const storageKey = `knowledge/${workspaceId}/${id}/${safeName(name)}.html`;

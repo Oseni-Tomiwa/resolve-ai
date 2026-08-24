@@ -67,4 +67,11 @@ describe('InboxService', () => {
     expect(db.widgetConversationNote.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ authorUserId: 'user-1', content: 'Private note' }) }));
     expect(db.widgetMessage.create).not.toHaveBeenCalled();
   });
+
+  it('requires human mode before sending a teammate reply', async () => {
+    const { service, db } = makeService();
+    db.widgetConversation.findFirst.mockResolvedValue({ id: 'conversation-1', workspaceId: 'workspace-1', mode: 'AI', status: 'OPEN' });
+    db.widgetConversation.updateMany.mockResolvedValue({ count: 0 });
+    await expect(service.reply('user-1', 'workspace-1', 'conversation-1', { content: 'We can help.' })).rejects.toThrow('Take over the conversation before replying');
+  });
 });

@@ -12,6 +12,14 @@ type Document = { id: string; name: string; originalFileName: string; status: st
 type PlaygroundResult = { answer: string; sources: Array<{ number: number; documentName: string; contentPreview: string; cited: boolean }>; metadata: { model: string | null; retrievalResultCount: number; latencyMs: number; insufficientContext: boolean } };
 const emptyAgent: Agent = { name: '', slug: '', description: null, instructions: '', greeting: null, fallbackMessage: null, model: 'gpt-4o-mini', temperature: 0.2, topP: 1, maxOutputTokens: 800, requireCitations: true, groundedOnly: true, allowFollowUpQuestions: true, allowGeneralKnowledge: false, status: 'DRAFT', isDefault: false, documentIds: [] };
 
+function humanizeDocumentName(name: string): string {
+  try {
+    return decodeURIComponent(name);
+  } catch {
+    return name;
+  }
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> { return apiRequest<T>(path, init); }
 
 export function AgentEditor({ agentId }: { agentId?: string }) {
@@ -35,7 +43,7 @@ export function AgentEditor({ agentId }: { agentId?: string }) {
     void Promise.all([
       api<{ items: ModelOption[] }>(`/workspaces/${currentWorkspace.id}/ai/agents/models`),
       api<Document[]>(`/workspaces/${currentWorkspace.id}/ai/agents/knowledge-documents`),
-    ]).then(([modelData, documentData]) => { setModels(modelData.items); setDocuments(documentData); }).catch(() => setModels([{ id: 'gpt-4o-mini', label: 'GPT-4o mini' }]));
+    ]).then(([modelData, documentData]) => { setModels(modelData.items); setDocuments(documentData.map((document) => ({ ...document, name: humanizeDocumentName(document.name), originalFileName: humanizeDocumentName(document.originalFileName) }))); }).catch(() => setModels([{ id: 'gpt-4o-mini', label: 'GPT-4o mini' }]));
     if (agentId) void api<Agent>(`/workspaces/${currentWorkspace.id}/ai/agents/${agentId}`).then(setAgent).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : 'Unable to load the agent.')).finally(() => setLoading(false));
   }, [agentId, currentWorkspace]);
   useEffect(() => { const handle = (event: BeforeUnloadEvent) => { if (dirty) { event.preventDefault(); event.returnValue = ''; } }; window.addEventListener('beforeunload', handle); return () => window.removeEventListener('beforeunload', handle); }, [dirty]);

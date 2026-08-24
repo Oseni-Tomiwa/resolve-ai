@@ -39,6 +39,7 @@ Important values include:
 
 - `WEB_URL`, `PUBLIC_API_URL`, `NEXT_PUBLIC_API_URL`, and `WIDGET_SCRIPT_URL` must use the public HTTPS origins.
 - `CORS_ALLOWED_ORIGINS` is a comma-separated exact-origin list for the dashboard. Public widget requests still pass the widget’s exact allowed-domain check.
+- Set `TRUST_PROXY=1` when API traffic enters through one AWS ALB/reverse-proxy hop. The API uses Express `req.ip` for rate-limit identity and does not trust arbitrary forwarded headers from direct clients. If additional trusted proxy hops are introduced, change this deliberately and test the full chain.
 - `DATABASE_URL` and `REDIS_URL` must be reachable from the container network.
 - `OPENAI_API_KEY` and `STRIPE_SECRET_KEY` remain backend-only and are never prefixed with `NEXT_PUBLIC_`.
 - Stripe billing requires `BILLING_PROVIDER=stripe`, `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, and recurring price IDs for `STRIPE_PRICE_PRO` and `STRIPE_PRICE_BUSINESS`.

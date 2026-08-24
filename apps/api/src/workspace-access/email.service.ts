@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Injectable, ServiceUnavailableException } from '@nestjs/common'; import { Queue } from 'bullmq';
+import { redisConnectionOptionsFromEnv } from '@resolveai/config';
 
 export type InvitationEmail = { invitationUrl: string; inviterName: string; organizationName: string; workspaceName: string; email: string; role: string; expiresAt: Date };
 export type LifecycleEmail = { email: string; url: string; expiresAt: Date };
@@ -31,7 +32,7 @@ export class EmailService {
     else if (provider === 'test') this.provider = new TestEmailProvider();
     else if (provider === 'smtp') throw new Error('SMTP email provider requires an SMTP adapter; configure EMAIL_PROVIDER=resend');
     else this.provider = new ConsoleEmailProvider();
-    this.queue = provider === 'resend' && process.env.NODE_ENV !== 'test' ? new Queue('email-delivery', { connection: { url: process.env.REDIS_URL ?? 'redis://localhost:6379' } }) : null;
+    this.queue = provider === 'resend' && process.env.NODE_ENV !== 'test' ? new Queue('email-delivery', { connection: redisConnectionOptionsFromEnv() }) : null;
   }
   private async deliver(message: EmailMessage): Promise<void> { if (this.sent.has(message.idempotencyKey)) return; try { if (this.queue) await this.queue.add('deliver-email', { message }, { jobId: createIdempotencyJobId(message.idempotencyKey), attempts: 5, backoff: { type: 'exponential', delay: 1000 }, removeOnComplete: 100, removeOnFail: 100 }); else await this.provider.send(message); this.sent.add(message.idempotencyKey); } catch { throw new ServiceUnavailableException('Email delivery is temporarily unavailable'); } }
   private lifecycle(kind: string, message: LifecycleEmail, title: string): EmailMessage { const safeUrl = escapeHtml(message.url); const expires = escapeHtml(message.expiresAt.toISOString()); return { to: message.email, subject: 'ResolveAI ' + title, idempotencyKey: kind + ':' + message.email + ':' + message.url, html: '<p>Use the link below to ' + title.toLowerCase() + ':</p><p><a href="' + safeUrl + '">' + safeUrl + '</a></p><p>This link expires at ' + expires + '.</p>', text: 'Use this link to ' + title.toLowerCase() + ': ' + message.url + '\nIt expires at ' + message.expiresAt.toISOString() + '.' }; }

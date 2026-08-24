@@ -1,11 +1,12 @@
 import { Injectable, ServiceUnavailableException, type OnModuleDestroy } from '@nestjs/common';
 import { Queue } from 'bullmq';
+import { redisConnectionOptionsFromEnv } from '@resolveai/config';
 
 export const KNOWLEDGE_QUEUE = 'knowledge-processing';
 
 @Injectable()
 export class KnowledgeQueueService implements OnModuleDestroy {
-  private readonly queue = new Queue(KNOWLEDGE_QUEUE, { connection: { url: process.env.REDIS_URL ?? 'redis://localhost:6379' } });
+  private readonly queue = new Queue(KNOWLEDGE_QUEUE, { connection: redisConnectionOptionsFromEnv() });
   async add(documentId: string, workspaceId: string): Promise<void> {
     try {
       const existing = await this.queue.getJob(documentId);

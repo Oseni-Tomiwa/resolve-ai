@@ -1,4 +1,4 @@
-import { BadRequestException, ForbiddenException, HttpException, HttpStatus, Inject, Injectable, NotFoundException, Optional, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, HttpException, HttpStatus, Inject, Injectable, NotFoundException, Optional, UnauthorizedException } from '@nestjs/common';
 import { createHash, randomBytes } from 'node:crypto';
 import type { PrismaClient } from '@resolveai/database';
 // Nest dependency injection needs the service constructor at runtime.
@@ -8,6 +8,9 @@ import type { UpdateWidgetConfigurationDto, WidgetConversationDto, WidgetMessage
 // Nest dependency injection needs this constructor at runtime.
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports
 import { AuditLogService } from '../audit-log/audit-log.service';
+// Nest dependency injection needs this constructor at runtime.
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports
+import { RateLimitService } from '../common/rate-limit.service';
 
 const sessionLifetimeMs = 24 * 60 * 60 * 1000;
 const maxMessagesPerSession = 100;
@@ -22,12 +25,11 @@ const hash = (value: string): string => createHash('sha256').update(value).diges
 const preview = (value: string): string => value.replace(/\s+/g, ' ').trim().slice(0, 240);
 const agentDocumentSelection = { knowledgeDocuments: { select: { knowledgeDocumentId: true } } } as const;
 
-type OriginRequest = { headers?: { origin?: string; 'x-forwarded-for'?: string | string[] } };
+type OriginRequest = { ip?: string; headers?: { origin?: string; 'x-forwarded-for'?: string | string[] } };
 
 @Injectable()
 export class WidgetService {
-  private readonly rateLimits = new Map<string, number[]>();
-  constructor(@Inject('PRISMA') private readonly db: PrismaClient, private readonly grounded: GroundedAnswerService, @Optional() private readonly audit?: AuditLogService) {}
+  constructor(@Inject('PRISMA') private readonly db: PrismaClient, private readonly grounded: GroundedAnswerService, @Optional() private readonly audit?: AuditLogService, @Optional() private readonly rateLimit?: RateLimitService) {}
 
   private async access(userId: string, workspaceId: string): Promise<void> {
     const workspace = await this.db.workspace.findUnique({ where: { id: workspaceId }, select: { organizationId: true } });
@@ -77,8 +79,8 @@ export class WidgetService {
   }
 
   private origin(request: OriginRequest): string | undefined { const value = request.headers?.origin; return Array.isArray(value) ? value[0] : value; }
-  private clientKey(request: OriginRequest): string { const value = request.headers?.['x-forwarded-for']; return Array.isArray(value) ? value[0] ?? 'unknown' : value?.split(',')[0]?.trim() ?? 'unknown'; }
-  private assertRateLimit(key: string, max: number, windowMs: number): void { const now = Date.now(); const recent = (this.rateLimits.get(key) ?? []).filter((timestamp) => now - timestamp < windowMs); if (recent.length >= max) this.publicError(HttpStatus.TOO_MANY_REQUESTS, 'RATE_LIMITED', 'Please try again shortly.'); recent.push(now); this.rateLimits.set(key, recent); }
+  private clientKey(request: OriginRequest): string { return request.ip ?? 'unknown'; }
+  private async assertRateLimit(key: string, max: number, windowMs: number): Promise<void> { if (this.rateLimit) { const allowed = this.rateLimit.allowDistributed ? await this.rateLimit.allowDistributed(`widget:${key}`, max, windowMs) : this.rateLimit.allow(`widget:${key}`, max, windowMs); if (!allowed) this.publicError(HttpStatus.TOO_MANY_REQUESTS, 'RATE_LIMITED', 'Please try again shortly.'); } }
 
   private assertOrigin(config: { allowedDomains: string[] }, origin: string | undefined): void {
     const normalized = origin ? normalizeOrigin(origin) : null;
@@ -93,7 +95,7 @@ export class WidgetService {
     if (!configuration || configuration.selectedAgent.status !== 'ACTIVE' || configuration.selectedAgent.deletedAt) this.publicError(HttpStatus.NOT_FOUND, 'WIDGET_NOT_FOUND', 'This support widget is unavailable.');
     this.assertOrigin(configuration, this.origin(request));
     if (requireEnabled && !configuration.enabled) this.publicError(HttpStatus.FORBIDDEN, 'WIDGET_DISABLED', 'This support widget is currently unavailable.');
-    this.assertRateLimit(`${publicId}:${this.clientKey(request)}`, 60, 60_000);
+    await this.assertRateLimit(`${publicId}:${this.clientKey(request)}`, 60, 60_000);
     return configuration;
   }
 
@@ -128,7 +130,8 @@ export class WidgetService {
     const conversation = await this.db.widgetConversation.findFirst({ where: { id: conversationId, sessionId: session.id, widgetConfigurationId: configuration.id } });
     if (!conversation) this.publicError(HttpStatus.NOT_FOUND, 'WIDGET_SESSION_INVALID', 'This support session is no longer valid.');
     if (conversation.mode === 'HUMAN') return { mode: 'HUMAN', status: conversation.status };
-    await this.db.widgetConversation.update({ where: { id_workspaceId: { id: conversationId, workspaceId: configuration.workspaceId } }, data: { mode: 'HUMAN', status: 'OPEN', lastMessageAt: new Date() } });
+    const changed = await this.db.widgetConversation.updateMany({ where: { id: conversationId, workspaceId: configuration.workspaceId, mode: 'AI', status: { not: 'RESOLVED' } }, data: { mode: 'HUMAN', status: 'OPEN', generationLockAt: null, lastMessageAt: new Date() } });
+    if (changed.count !== 1) return { mode: 'HUMAN', status: conversation.status };
     await this.db.widgetMessage.create({ data: { conversationId, workspaceId: configuration.workspaceId, role: 'SYSTEM', content: 'A visitor requested a support teammate.', status: 'COMPLETE' } });
     return { mode: 'HUMAN', status: 'OPEN' };
   }
@@ -144,12 +147,16 @@ export class WidgetService {
     const { configuration, session } = await this.session(publicId, dto.sessionId, request);
     const content = dto.content.trim();
     if (!content) throw new BadRequestException('Message cannot be empty');
-    this.assertRateLimit(`${publicId}:message:${this.clientKey(request)}`, 12, 60_000);
+    await this.assertRateLimit(`${publicId}:message:${this.clientKey(request)}`, 12, 60_000);
     const conversation = await this.db.widgetConversation.findFirst({ where: { id: conversationId, sessionId: session.id, widgetConfigurationId: configuration.id }, include: { agent: { include: agentDocumentSelection } } });
     if (!conversation) throw new NotFoundException('Conversation not found');
     if (conversation.status === 'RESOLVED') { yield { type: 'conversation.resolved', message: 'This conversation has been resolved. Please start a new conversation if you need more help.' }; return; }
     const existing = dto.clientMessageId ? await this.db.widgetMessage.findFirst({ where: { conversationId, workspaceId: configuration.workspaceId, clientMessageId: dto.clientMessageId } }) : null;
     if (existing) return;
+    if (conversation.mode === 'AI') {
+      const locked = await this.db.widgetConversation.updateMany({ where: { id: conversationId, workspaceId: configuration.workspaceId, mode: 'AI', status: { not: 'RESOLVED' }, OR: [{ generationLockAt: null }, { generationLockAt: { lt: new Date(Date.now() - 5 * 60 * 1000) } }] }, data: { generationLockAt: new Date() } });
+      if (locked.count !== 1) throw new ConflictException('This conversation is already generating a response');
+    }
     const created = await this.db.$transaction(async (tx) => {
       const user = await tx.widgetMessage.create({ data: { conversationId, workspaceId: configuration.workspaceId, role: 'USER', content, status: 'COMPLETE', clientMessageId: dto.clientMessageId } });
       await tx.widgetConversation.update({ where: { id_workspaceId: { id: conversationId, workspaceId: configuration.workspaceId } }, data: { lastMessageAt: new Date() } });
@@ -163,19 +170,20 @@ export class WidgetService {
       const prepared = await this.grounded.preparePublic(configuration.workspaceId, content, { instructions: conversation.agent.instructions, fallbackMessage: conversation.agent.fallbackMessage, provider: conversation.agent.provider, model: conversation.agent.model, temperature: conversation.agent.temperature, topP: conversation.agent.topP, maxOutputTokens: conversation.agent.maxOutputTokens, documentIds: conversation.agent.knowledgeDocuments?.map((item) => item.knowledgeDocumentId) ?? [], requireCitations: conversation.agent.requireCitations, groundedOnly: conversation.agent.groundedOnly, allowGeneralKnowledge: conversation.agent.allowGeneralKnowledge });
       if (prepared.insufficient) {
         const fallback = conversation.agent.fallbackMessage ?? 'I couldn’t find enough information in the workspace knowledge base to answer that.';
-        await this.complete(created.assistant.id, configuration.workspaceId, fallback, null, prepared, []);
+        await this.complete(created.assistant.id, conversationId, configuration.workspaceId, fallback, null, prepared, []);
         yield { type: 'message.delta', delta: fallback }; yield { type: 'sources', sources: [] }; yield { type: 'message.completed', messageId: created.assistant.id }; return;
       }
       await this.db.widgetMessage.update({ where: { id: created.assistant.id }, data: { status: 'STREAMING' } });
       const deltas: string[] = []; let usage = { inputTokens: 0, outputTokens: 0 };
-      for await (const event of this.grounded.streamPrepared({ question: prepared.question, context: prepared.context, instructions: prepared.instructions, maximumOutputTokens: prepared.maximumOutputTokens, provider: prepared.provider, model: prepared.model, temperature: prepared.temperature, topP: prepared.topP })) { if (event.type === 'response.delta') { deltas.push(event.delta); yield { type: 'message.delta', delta: event.delta }; } if (event.type === 'response.completed') usage = event.usage; if (event.type === 'response.failed') throw new Error('generation_failed'); }
+      for await (const event of this.grounded.streamPrepared({ question: prepared.question, context: prepared.context, instructions: prepared.instructions, maximumOutputTokens: prepared.maximumOutputTokens, provider: prepared.provider, model: prepared.model, temperature: prepared.temperature, topP: prepared.topP })) { const current = await this.db.widgetConversation.findFirst({ where: { id: conversationId, workspaceId: configuration.workspaceId }, select: { mode: true, status: true } }); if (!current || current.mode !== 'AI' || current.status === 'RESOLVED') throw new Error('generation_superseded'); if (event.type === 'response.delta') { deltas.push(event.delta); yield { type: 'message.delta', delta: event.delta }; } if (event.type === 'response.completed') usage = event.usage; if (event.type === 'response.failed') throw new Error('generation_failed'); }
       const answer = deltas.join('').trim(); const sources = this.grounded.sourcesFor(prepared, Array.from(answer.matchAll(/\[(\d+)\]/g), (match) => Number(match[1])));
-      await this.complete(created.assistant.id, configuration.workspaceId, answer, prepared.provider, prepared, sources, usage);
+      await this.complete(created.assistant.id, conversationId, configuration.workspaceId, answer, prepared.provider, prepared, sources, usage);
       yield { type: 'sources', sources: sources.map((source) => ({ number: source.number, documentName: source.documentName, contentPreview: source.contentPreview, cited: source.cited })) }; yield { type: 'message.completed', messageId: created.assistant.id };
-    } catch (error) { await this.db.widgetMessage.update({ where: { id: created.assistant.id }, data: { status: 'FAILED', errorCode: error instanceof Error && error.name === 'AbortError' ? 'CANCELLED' : 'GENERATION_FAILED' } }).catch(() => undefined); yield { type: 'message.failed', error: { code: 'GENERATION_FAILED', message: 'The support assistant could not complete this response.' } }; }
+    } catch (error) { const superseded = error instanceof Error && error.message === 'generation_superseded'; await this.db.widgetMessage.update({ where: { id: created.assistant.id }, data: { status: superseded || error instanceof Error && error.name === 'AbortError' ? 'CANCELLED' : 'FAILED', errorCode: superseded || error instanceof Error && error.name === 'AbortError' ? 'CANCELLED' : 'GENERATION_FAILED' } }).catch(() => undefined); if (!superseded) yield { type: 'message.failed', error: { code: 'GENERATION_FAILED', message: 'The support assistant could not complete this response.' } }; }
+    finally { await this.db.widgetConversation.updateMany({ where: { id: conversationId, workspaceId: configuration.workspaceId }, data: { generationLockAt: null } }).catch(() => undefined); }
   }
 
-  private async complete(messageId: string, workspaceId: string, content: string, provider: string | null, prepared: PreparedGroundedAnswer, sources: Array<{ number: number; documentId: string; chunkId: string; documentName: string; chunkIndex: number; contentPreview: string; similarityScore: number; cited: boolean }>, usage = { inputTokens: 0, outputTokens: 0 }): Promise<void> {
-    await this.db.$transaction(async (tx) => { await tx.widgetMessage.update({ where: { id: messageId }, data: { content, status: 'COMPLETE', provider, model: prepared.model, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens } }); await tx.widgetConversation.update({ where: { id_workspaceId: { id: (await tx.widgetMessage.findUniqueOrThrow({ where: { id: messageId }, select: { conversationId: true } })).conversationId, workspaceId } }, data: { lastMessageAt: new Date() } }); if (sources.length) await tx.widgetMessageSource.createMany({ data: sources.map((source) => ({ messageId, workspaceId, documentId: source.documentId, chunkId: source.chunkId, sourceNumber: source.number, documentNameSnapshot: source.documentName, chunkIndexSnapshot: source.chunkIndex, contentPreview: preview(source.contentPreview), similarityScore: source.similarityScore, cited: source.cited })) }); });
+  private async complete(messageId: string, conversationId: string, workspaceId: string, content: string, provider: string | null, prepared: PreparedGroundedAnswer, sources: Array<{ number: number; documentId: string; chunkId: string; documentName: string; chunkIndex: number; contentPreview: string; similarityScore: number; cited: boolean }>, usage = { inputTokens: 0, outputTokens: 0 }): Promise<void> {
+    await this.db.$transaction(async (tx) => { const changed = await tx.widgetConversation.updateMany({ where: { id: conversationId, workspaceId, mode: 'AI', generationLockAt: { not: null } }, data: { lastMessageAt: new Date(), generationLockAt: null } }); if (changed.count !== 1) throw new Error('generation_superseded'); await tx.widgetMessage.update({ where: { id: messageId }, data: { content, status: 'COMPLETE', provider, model: prepared.model, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens } }); if (sources.length) await tx.widgetMessageSource.createMany({ data: sources.map((source) => ({ messageId, workspaceId, documentId: source.documentId, chunkId: source.chunkId, sourceNumber: source.number, documentNameSnapshot: source.documentName, chunkIndexSnapshot: source.chunkIndex, contentPreview: preview(source.contentPreview), similarityScore: source.similarityScore, cited: source.cited })) }); });
   }
 }

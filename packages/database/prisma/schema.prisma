@@ -320,7 +320,7 @@ enum KnowledgeDocumentStatus {
 model KnowledgeDocument {
   id                      String                   @id @default(uuid()) @db.Uuid
   workspaceId             String                   @db.Uuid
-  uploadedByUserId        String                   @db.Uuid
+  uploadedByUserId        String?                  @db.Uuid
   name                    String
   originalFileName        String
   mimeType                String
@@ -334,7 +334,7 @@ model KnowledgeDocument {
   processedAt             DateTime?
   deletedAt               DateTime?
   workspace               Workspace                @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
-  uploadedBy              User                     @relation("DocumentUploader", fields: [uploadedByUserId], references: [id], onDelete: Cascade)
+  uploadedBy              User?                    @relation("DocumentUploader", fields: [uploadedByUserId], references: [id], onDelete: SetNull)
   chunks                  KnowledgeChunk[]
   embeddings              KnowledgeEmbedding[]
   aiMessageSources        AIMessageSource[]
@@ -531,6 +531,7 @@ model WidgetConversation {
   lastMessageAt         DateTime                    @default(now())
   resolvedAt            DateTime?
   resolvedByUserId      String?                     @db.Uuid
+  generationLockAt      DateTime?
   createdAt             DateTime                    @default(now())
   updatedAt             DateTime                    @updatedAt
   widgetConfiguration   WidgetConfiguration         @relation(fields: [widgetConfigurationId], references: [id], onDelete: Cascade)
@@ -547,6 +548,7 @@ model WidgetConversation {
   @@index([workspaceId, status, lastMessageAt])
   @@index([workspaceId, assignedUserId])
   @@index([sessionId, createdAt])
+  @@index([workspaceId, generationLockAt])
 }
 
 model WidgetMessage {
